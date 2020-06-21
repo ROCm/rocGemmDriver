@@ -116,4 +116,10 @@ install_blis()
 
 install_blis
 
-make VALIDATE=$VALIDATE ROCBLASPATH=$ROCBLAS DEBUG=$DEBUG
+if sudo cat /opt/rocm/hip/lib/.hipInfo | grep clang ; then
+  CLANG=1
+else
+  CLANG=0
+fi
+
+make VALIDATE=$VALIDATE ROCBLASPATH=$ROCBLAS DEBUG=$DEBUG CLANG=$CLANG

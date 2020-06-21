@@ -145,7 +145,7 @@ inline void rocblas_expect_status(rocblas_status status, rocblas_status expect)
 
 // gemm
 template <typename T>
-rocblas_status (*rocblas_gemm)(rocblas_handle    handle,
+static rocblas_status (*rocblas_gemm)(rocblas_handle    handle,
                                rocblas_operation transA,
                                rocblas_operation transB,
                                rocblas_int       m,
@@ -161,17 +161,17 @@ rocblas_status (*rocblas_gemm)(rocblas_handle    handle,
                                rocblas_int       ldc);
 
 template <>
-constexpr auto rocblas_gemm<rocblas_half> = rocblas_hgemm;
+ROCBLAS_CLANG_STATIC constexpr auto rocblas_gemm<rocblas_half> = rocblas_hgemm;
 
 template <>
-constexpr auto rocblas_gemm<float> = rocblas_sgemm;
+ROCBLAS_CLANG_STATIC constexpr auto rocblas_gemm<float> = rocblas_sgemm;
 
 template <>
-constexpr auto rocblas_gemm<double> = rocblas_dgemm;
+ROCBLAS_CLANG_STATIC constexpr auto rocblas_gemm<double> = rocblas_dgemm;
 
 // gemm_strided_batched
 template <typename T>
-rocblas_status (*rocblas_gemm_strided_batched)(rocblas_handle    handle,
+static rocblas_status (*rocblas_gemm_strided_batched)(rocblas_handle    handle,
                                                rocblas_operation transA,
                                                rocblas_operation transB,
                                                rocblas_int       m,
@@ -191,13 +191,13 @@ rocblas_status (*rocblas_gemm_strided_batched)(rocblas_handle    handle,
                                                rocblas_int       batch_count);
 
 template <>
-constexpr auto rocblas_gemm_strided_batched<rocblas_half> = rocblas_hgemm_strided_batched;
+ROCBLAS_CLANG_STATIC constexpr auto rocblas_gemm_strided_batched<rocblas_half> = rocblas_hgemm_strided_batched;
 
 template <>
-constexpr auto rocblas_gemm_strided_batched<float> = rocblas_sgemm_strided_batched;
+ROCBLAS_CLANG_STATIC constexpr auto rocblas_gemm_strided_batched<float> = rocblas_sgemm_strided_batched;
 
 template <>
-constexpr auto rocblas_gemm_strided_batched<double> = rocblas_dgemm_strided_batched;
+ROCBLAS_CLANG_STATIC constexpr auto rocblas_gemm_strided_batched<double> = rocblas_dgemm_strided_batched;
 
 /* ============================================================================================ */
 // Random number generator
