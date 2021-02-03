@@ -1,3 +1,4 @@
+#!/bin/bash
 VALIDATE=0
 HELP=N
 DEBUG=0

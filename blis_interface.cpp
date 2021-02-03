@@ -2,6 +2,7 @@
 #include "blis_interface.hpp"
 #include "blis.h"
 #include "omp.h"
+#include <vector>
 
 trans_t blis_transpose(rocblas_operation trans)
 {

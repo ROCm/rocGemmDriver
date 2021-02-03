@@ -8,10 +8,10 @@ ROCBLASINCL = -I /opt/rocm/rocblas/include/
 else
 ifeq ($(DEBUG),1)
 ROCBLASLIB = -lrocblas -L $(ROCBLASPATH)/build/debug/library/src/ -rpath $(ROCBLASPATH)/build/debug/library/src/
-ROCBLASINCL = -I $(ROCBLASPATH)/library/include/ -I $(ROCBLASPATH)/build/debug/include/
+ROCBLASINCL = -I $(ROCBLASPATH)/library/include/ -I $(ROCBLASPATH)/build/debug/include/ -I $(ROCBLASPATH)/build/debug/include/internal
 else
 ROCBLASLIB = -lrocblas -L $(ROCBLASPATH)/build/release/library/src/ -rpath $(ROCBLASPATH)/build/release/library/src/
-ROCBLASINCL = -I $(ROCBLASPATH)/library/include/ -I $(ROCBLASPATH)/build/release/include/
+ROCBLASINCL = -I $(ROCBLASPATH)/library/include/ -I $(ROCBLASPATH)/build/release/include/ -I $(ROCBLASPATH)/build/release/include/internal
 endif
 endif
 
@@ -22,18 +22,18 @@ endif
 ifeq ($(VALIDATE),1)
 ifeq ($(DEBUG),1)
 GemmDriver: GemmDriver.o blis_interface.o
-	/opt/rocm/hip/bin/hipcc -rtlib=compiler-rt -g -o GemmDriver GemmDriver.o blis_interface.o $(LINKER_FLAG) $(BLIS) $(FLAME)  $(ROCBLASLIB) $(BOOST)
+	/opt/rocm/hip/bin/hipcc -g -o GemmDriver GemmDriver.o blis_interface.o $(LINKER_FLAG) $(BLIS) $(FLAME)  $(ROCBLASLIB) $(BOOST)
 else
 GemmDriver: GemmDriver.o blis_interface.o
-	/opt/rocm/hip/bin/hipcc -rtlib=compiler-rt -o GemmDriver GemmDriver.o blis_interface.o $(LINKER_FLAG) $(BLIS) $(FLAME)  $(ROCBLASLIB) $(BOOST)
+	/opt/rocm/hip/bin/hipcc -o GemmDriver GemmDriver.o blis_interface.o $(LINKER_FLAG) $(BLIS) $(FLAME)  $(ROCBLASLIB) $(BOOST)
 endif
 else
 ifeq ($(DEBUG),1)
 GemmDriver: GemmDriver.o
-	/opt/rocm/hip/bin/hipcc -rtlib=compiler-rt -g -o GemmDriver GemmDriver.o $(LINKER_FLAG) $(ROCBLASLIB) $(BOOST)
+	/opt/rocm/hip/bin/hipcc -g -o GemmDriver GemmDriver.o $(LINKER_FLAG) $(ROCBLASLIB) $(BOOST)
 else
 GemmDriver: GemmDriver.o
-	/opt/rocm/hip/bin/hipcc -rtlib=compiler-rt -o GemmDriver GemmDriver.o $(LINKER_FLAG) $(ROCBLASLIB) $(BOOST)
+	/opt/rocm/hip/bin/hipcc -o GemmDriver GemmDriver.o $(LINKER_FLAG) $(ROCBLASLIB) $(BOOST)
 endif
 endif
 
