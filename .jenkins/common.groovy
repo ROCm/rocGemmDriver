@@ -16,7 +16,7 @@ def runCompileCommand(platform, project, jobName)
                     set -x
                     cd ${project.paths.project_build_prefix}
                     ${getDependenciesCommand}
-                    ./install -v 1
+                    ./install.sh -v 1
                   """
     platform.runCommand(this, command)
 }
