@@ -23,7 +23,7 @@ def runCI =
     boolean formatCheck = false
     boolean staticAnalysis = true
 
-    buildProject(prj, null, nodes.dockerArray, null, null, null, staticAnalysis)
+    buildProject(prj, formatCheck, nodes.dockerArray, null, null, null, staticAnalysis)
 }
 
 ci: {
