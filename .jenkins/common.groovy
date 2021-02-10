@@ -14,8 +14,8 @@ def runCompileCommand(platform, project, jobName)
     def command = """
                     #!/usr/bin/env bash
                     set -x
-                    cd ${project.paths.project_build_prefix}
                     ${getDependenciesCommand}
+                    cd ${project.paths.project_build_prefix}
                     ./install.sh -v 1
                   """
     platform.runCommand(this, command)
