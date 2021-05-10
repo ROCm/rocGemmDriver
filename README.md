@@ -94,6 +94,13 @@ The following arguments are the basic parameters for all GEMM launches:
                                    Options: 0 = No, 1 = Yes (default: No)
 
 --device (=0)                      Set default device to be used for subsequent program runs
+
+--multi_device (=1)                This flag is used to specify how many devices to launch work on simultaneously (default: 1)
+                                   The first x amount of devices will be used (--device flag is muted). 
+                                   Multiple threads will sync after setup for each device.
+                                   Then a rocblas call will be deployed to each device simultaneously and the longest timing duration will be pulled.
+                                   Each device will run iters iterations, and total performance will be calculated as combined iterations
+                                   Flag cannot be combined with time_each_iter
 ```
 GEMM Strided Batched requires the following additional arguments:
 ```
@@ -127,7 +134,7 @@ GEMM EX requires the following arguments in addition to both of the previous lis
 --algo arg (=0)                    Extended precision gemm algorithm
 --solution_index arg (=0)          Extended precision gemm solution index
 --flags arg (=10)                  Extended precision gemm flags
---c_equals_d arg (=0)              Is C equal to D? 0 = No, 1 = Yes (default: No)
+--c_equals_d arg (=1)              Is C equal to D? 0 = No, 1 = Yes (default: Yes)
 ```
 Note: If a precision of bf16_r is chosen, compute_type must explicitly be set to f32_r/s
 
