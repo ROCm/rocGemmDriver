@@ -1,3 +1,24 @@
+/* ************************************************************************
+ * Copyright (c) <2021> Advanced Micro Devices, Inc.
+ *  
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *  
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *  
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ * ************************************************************************ */
 #ifndef _UTILITY_
 #define _UTILITY_
 
@@ -12,9 +33,770 @@
 #include <random>
 #include <sys/time.h>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+#include <queue>
+#include <fcntl.h>
+#include <type_traits>
+#include <sys/stat.h>
 
 #include <boost/program_options.hpp>
 namespace po = boost::program_options;
+
+// clang-format off
+// return letter N,T,C in place of rocblas_operation enum
+constexpr char rocblas_transpose_letter(rocblas_operation trans)
+{
+    switch(trans)
+    {
+    case rocblas_operation_none:                return 'N';
+    case rocblas_operation_transpose:           return 'T';
+    case rocblas_operation_conjugate_transpose: return 'C';
+    }
+    return ' ';
+}
+
+// return letter L, R, B in place of rocblas_side enum
+constexpr char rocblas_side_letter(rocblas_side side)
+{
+    switch(side)
+    {
+    case rocblas_side_left:  return 'L';
+    case rocblas_side_right: return 'R';
+    case rocblas_side_both:  return 'B';
+    }
+    return ' ';
+}
+
+// return letter U, L, B in place of rocblas_fill enum
+constexpr char rocblas_fill_letter(rocblas_fill fill)
+{
+    switch(fill)
+    {
+    case rocblas_fill_upper: return 'U';
+    case rocblas_fill_lower: return 'L';
+    case rocblas_fill_full:  return 'F';
+    }
+    return ' ';
+}
+
+// return letter N, U in place of rocblas_diagonal enum
+constexpr char rocblas_diag_letter(rocblas_diagonal diag)
+{
+    switch(diag)
+    {
+    case rocblas_diagonal_non_unit: return 'N';
+    case rocblas_diagonal_unit:     return 'U';
+    }
+    return ' ';
+}
+
+// return precision string for rocblas_datatype
+constexpr const char* rocblas_datatype_string(rocblas_datatype type)
+{
+    switch(type)
+    {
+    case rocblas_datatype_f16_r:  return "f16_r";
+    case rocblas_datatype_f32_r:  return "f32_r";
+    case rocblas_datatype_f64_r:  return "f64_r";
+    case rocblas_datatype_f16_c:  return "f16_c";
+    case rocblas_datatype_f32_c:  return "f32_c";
+    case rocblas_datatype_f64_c:  return "f64_c";
+    case rocblas_datatype_i8_r:   return "i8_r";
+    case rocblas_datatype_u8_r:   return "u8_r";
+    case rocblas_datatype_i32_r:  return "i32_r";
+    case rocblas_datatype_u32_r:  return "u32_r";
+    case rocblas_datatype_i8_c:   return "i8_c";
+    case rocblas_datatype_u8_c:   return "u8_c";
+    case rocblas_datatype_i32_c:  return "i32_c";
+    case rocblas_datatype_u32_c:  return "u32_c";
+    case rocblas_datatype_bf16_r: return "bf16_r";
+    case rocblas_datatype_bf16_c: return "bf16_c";
+    }
+    return "invalid";
+}
+
+// return sizeof rocblas_datatype
+constexpr size_t rocblas_sizeof_datatype(rocblas_datatype type)
+{
+    switch(type)
+    {
+    case rocblas_datatype_f16_r:  return 2;
+    case rocblas_datatype_f32_r:  return 4;
+    case rocblas_datatype_f64_r:  return 8;
+    case rocblas_datatype_f16_c:  return 4;
+    case rocblas_datatype_f32_c:  return 8;
+    case rocblas_datatype_f64_c:  return 16;
+    case rocblas_datatype_i8_r:   return 1;
+    case rocblas_datatype_u8_r:   return 1;
+    case rocblas_datatype_i32_r:  return 4;
+    case rocblas_datatype_u32_r:  return 4;
+    case rocblas_datatype_i8_c:   return 2;
+    case rocblas_datatype_u8_c:   return 2;
+    case rocblas_datatype_i32_c:  return 8;
+    case rocblas_datatype_u32_c:  return 8;
+    case rocblas_datatype_bf16_r: return 2;
+    case rocblas_datatype_bf16_c: return 4;
+    }
+    return 0;
+}
+
+// Convert atomics mode to string
+constexpr const char* rocblas_atomics_mode_to_string(rocblas_atomics_mode mode)
+{
+    return mode != rocblas_atomics_not_allowed ? "atomics_allowed" : "atomics_not_allowed";
+}
+
+// Convert gemm flags to string
+constexpr const char* rocblas_gemm_flags_to_string(rocblas_gemm_flags)
+{
+    return "none";
+}
+
+#define rocblas_cout (internal_ostream::cout())
+#define rocblas_cerr (internal_ostream::cerr())
+
+/***************************************************************************
+ * The internal_ostream class performs atomic IO on log files, and provides *
+ * consistent formatting                                                   *
+ ***************************************************************************/
+class internal_ostream
+{
+    /**************************************************************************
+     * The worker class sets up a worker thread for writing to log files. Two *
+     * files are considered the same if they have the same device ID / inode. *
+     **************************************************************************/
+    class worker
+    {
+        // task_t represents a payload of data and a promise to finish
+        class task_t
+        {
+            std::string        str;
+            std::promise<void> promise;
+
+        public:
+            // The task takes ownership of the string payload
+            task_t(std::string&& str, std::promise<void>&& promise)
+                : str(std::move(str))
+                , promise(std::move(promise))
+            {
+            }
+
+            auto get_future()
+            {
+                return promise.get_future();
+            }
+
+            // Notify the future to wake up
+            void set_value()
+            {
+                promise.set_value();
+            }
+
+            // Size of the string payload
+            size_t size() const
+            {
+                return str.size();
+            }
+
+            // Data of the string payload
+            const char* data() const
+            {
+                return str.data();
+            }
+        };
+
+        // FILE is used for safety in the presence of signals
+        FILE* file = nullptr;
+
+        // This worker's thread
+        std::thread thread;
+
+        // Condition variable for worker notification
+        std::condition_variable cond;
+
+        // Mutex for this thread's queue
+        std::mutex mutex;
+
+        // Queue of tasks
+        std::queue<task_t> queue;
+
+        // Worker thread which waits for and handles tasks sequentially
+        void thread_function()
+        {
+            // Clear any errors in the FILE
+            clearerr(file);
+
+            // Lock the mutex in preparation for cond.wait
+            std::unique_lock<std::mutex> lock(mutex);
+
+            while(true)
+            {
+                // Wait for any data, ignoring spurious wakeups
+                cond.wait(lock, [&] { return !queue.empty(); });
+
+                // With the mutex locked, get and pop data from the front of queue
+                task_t task = std::move(queue.front());
+                queue.pop();
+
+                // Temporarily unlock queue mutex, unblocking other threads
+                lock.unlock();
+
+                // An empty message indicates the closing of the stream
+                if(!task.size())
+                {
+                    // Tell future to wake up
+                    task.set_value();
+                    break;
+                }
+
+                // Write the data
+                fwrite(task.data(), 1, task.size(), file);
+
+                // Detect any error and flush the C FILE stream
+                if(ferror(file) || fflush(file))
+                {
+                    perror("Error writing log file");
+
+                    // Tell future to wake up
+                    task.set_value();
+                    break;
+                }
+
+                // Promise that the data has been written
+                task.set_value();
+
+                // Re-lock the mutex in preparation for cond.wait
+                lock.lock();
+            }
+        }
+
+    public:
+        // Worker constructor creates a worker thread for a raw filehandle
+        explicit worker(int fd)
+        {
+            // The worker duplicates the file descriptor (RAII)
+            fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+
+            // If the dup fails or fdopen fails, print error and abort
+            if(fd == -1 || !(file = fdopen(fd, "a")))
+            {
+                perror("fdopen() error");
+                rocblas_abort();
+            }
+
+            // Create a worker thread, capturing *this
+            thread = std::thread([=] { thread_function(); });
+
+            // Detatch from the worker thread
+            thread.detach();
+        }
+
+        // Send a string to be written
+        void send(std::string str)
+        {
+            // Create a promise to wait for the operation to complete
+            std::promise<void> promise;
+
+            // The future indicating when the operation has completed
+            auto future = promise.get_future();
+
+            // task_t consists of string and promise
+            // std::move transfers ownership of str and promise to task
+            task_t worker_task(std::move(str), std::move(promise));
+
+            // Submit the task to the worker assigned to this device/inode
+            // Hold mutex for as short as possible, to reduce contention
+            // TODO: Consider whether notification should be done with lock held or released
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                queue.push(std::move(worker_task));
+                cond.notify_one();
+            }
+
+            // Wait for the task to be completed, to ensure flushed IO
+            future.get();
+        }
+
+        // Destroy a worker when all std::shared_ptr references to it are gone
+        ~worker()
+        {
+            // Tell worker thread to exit, by sending it an empty string
+            send({});
+
+            // Close the FILE
+            if(file)
+                fclose(file);
+        }
+    };
+
+    // Two filehandles point to the same file if they share the same (std_dev, std_ino).
+    
+    // Initial slice of struct stat which contains device ID and inode
+    struct file_id_t
+    {
+        dev_t st_dev; // ID of device containing file
+        ino_t st_ino; // Inode number
+    };
+
+    // Compares device IDs and inodes for map containers
+    struct file_id_less
+    {
+        bool operator()(const file_id_t& lhs, const file_id_t& rhs) const
+        {
+            return lhs.st_ino < rhs.st_ino || (lhs.st_ino == rhs.st_ino && lhs.st_dev < rhs.st_dev);
+        }
+    };
+
+    // Map from file_id to a worker shared_ptr
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static auto& map()
+    {
+        static std::map<file_id_t, std::shared_ptr<worker>, file_id_less> map;
+        return map;
+    }
+
+    // Mutex for accessing the map
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static auto& map_mutex()
+    {
+        static std::recursive_mutex map_mutex;
+        return map_mutex;
+    }
+
+    // Map from file_id to a worker shared_ptr
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static auto& worker_map()
+    {
+        static std::map<file_id_t, std::shared_ptr<worker>, file_id_less> file_id_to_worker_map;
+        return file_id_to_worker_map;
+    }
+
+    // Mutex for accessing the map
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static auto& worker_map_mutex()
+    {
+        static std::recursive_mutex map_mutex;
+        return map_mutex;
+    }
+
+    // Output buffer for formatted IO
+    std::ostringstream os;
+
+    // Worker thread for accepting tasks
+    std::shared_ptr<worker> worker_ptr;
+
+    // Flag indicating whether YAML mode is turned on
+    bool yaml = false;
+
+    // Get worker for file descriptor
+    static std::shared_ptr<worker> get_worker(int fd)
+    {
+        // For a file descriptor indicating an error, return a nullptr
+        if(fd == -1)
+            return nullptr;
+
+        // C++ allows type punning of common initial sequences
+        union
+        {
+            struct stat statbuf;
+            file_id_t   file_id;
+        };
+
+        // Verify common initial sequence
+        static_assert(std::is_standard_layout<file_id_t>{} && std::is_standard_layout<struct stat>{}
+                        && offsetof(file_id_t, st_dev) == 0 && offsetof(struct stat, st_dev) == 0
+                        && offsetof(file_id_t, st_ino) == offsetof(struct stat, st_ino)
+                        && std::is_same<decltype(file_id_t::st_dev), decltype(stat::st_dev)>{}
+                        && std::is_same<decltype(file_id_t::st_ino), decltype(stat::st_ino)>{},
+                    "struct stat and file_id_t are not layout-compatible");
+
+        // Get the device ID and inode, to detect common files
+        if(fstat(fd, &statbuf))
+        {
+            perror("Error executing fstat()");
+            return nullptr;
+        }
+
+        // Lock the map from file_id -> std::shared_ptr<internal_ostream::worker>
+        std::lock_guard<std::recursive_mutex> lock(map_mutex());
+
+        // Insert a nullptr map element if file_id doesn't exist in map already
+        // worker_ptr is a reference to the std::shared_ptr<internal_ostream::worker>
+        auto& worker_ptr = map().emplace(file_id, nullptr).first->second;
+
+        // If a new entry was inserted, or an old entry is empty, create new worker
+        if(!worker_ptr)
+            worker_ptr = std::make_shared<worker>(fd);
+
+        // Return the existing or new worker matching the file
+        return worker_ptr;
+    }
+
+    // Private explicit copy constructor duplicates the worker and starts a new buffer
+    explicit internal_ostream(const internal_ostream& other)
+        : worker_ptr(other.worker_ptr)
+    {
+    }
+
+public:
+    // Default constructor is a std::ostringstream with no worker
+    internal_ostream() = default;
+
+    // Move constructor
+    internal_ostream(internal_ostream&&) = default;
+
+    // Move assignment
+    internal_ostream& operator=(internal_ostream&&) & = default;
+
+    // Copy assignment is deleted
+    internal_ostream& operator=(const internal_ostream&) = delete;
+
+    // Construct from a file descriptor, which is duped
+    explicit internal_ostream(int fd)
+        : worker_ptr(get_worker(fd))
+    {
+        if(!worker_ptr)
+        {
+            dprintf(STDERR_FILENO, "Error: Bad file descriptor %d\n", fd);
+            rocblas_abort();
+        }
+    }
+
+    // Construct from a C filename
+    explicit internal_ostream(const char* filename)
+    {
+        int fd     = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
+        worker_ptr = get_worker(fd);
+        if(!worker_ptr)
+        {
+            dprintf(STDERR_FILENO, "Cannot open %s: %m\n", filename);
+            rocblas_abort();
+        }
+        close(fd);
+    }
+
+    // Construct from a std::string filename
+    explicit internal_ostream(const std::string& filename)
+        : internal_ostream(filename.c_str())
+    {
+    }
+
+    // Create a duplicate of this
+    internal_ostream dup() const
+    {
+        if(!worker_ptr)
+            throw std::runtime_error(
+                "Attempting to duplicate a internal_ostream without an associated file");
+        return internal_ostream(*this);
+    }
+
+    // For testing to allow file closing and deletion
+    static void clear_workers();
+
+    // Convert stream output to string
+    std::string str() const
+    {
+        return os.str();
+    }
+
+    // Clear the buffer
+    void clear()
+    {
+        os.clear();
+        os.str({});
+    }
+
+    // Flush the output
+    void flush()
+    {
+        // Flush only if this stream contains a worker (i.e., is not a string)
+        if(worker_ptr)
+        {
+            // The contents of the string buffer
+            auto str = os.str();
+
+            // Empty string buffers kill the worker thread, so they are not flushed here
+            if(str.size())
+                worker_ptr->send(std::move(str));
+
+            // Clear the string buffer
+            clear();
+        }
+    }
+
+    // Destroy the internal_ostream
+    virtual ~internal_ostream()
+    {
+        flush(); // Flush any pending IO
+    }
+
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static internal_ostream& cout()
+    {
+        thread_local internal_ostream t_cout{STDOUT_FILENO};
+        return t_cout;
+    }
+
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static internal_ostream& cerr()
+    {
+        thread_local internal_ostream t_cerr{STDERR_FILENO};
+        return t_cerr;
+    }
+
+    // Abort function which safely flushes all IO
+    friend void rocblas_abort_once();
+
+    /*************************************************************************
+     * Non-member friend functions for formatted output                      *
+     *************************************************************************/
+
+    // Default output for non-enumeration types
+    template <typename T, std::enable_if_t<!std::is_enum<std::decay_t<T>>{}, int> = 0>
+    friend internal_ostream& operator<<(internal_ostream& os, T&& x)
+    {
+        os.os << std::forward<T>(x);
+        return os;
+    }
+
+    // Default output for enumeration types
+    template <typename T, std::enable_if_t<std::is_enum<std::decay_t<T>>{}, int> = 0>
+    friend internal_ostream& operator<<(internal_ostream& os, T&& x)
+    {
+        os.os << std::underlying_type_t<std::decay_t<T>>(x);
+        return os;
+    }
+
+    // Pairs for YAML output
+    template <typename T1, typename T2>
+    friend internal_ostream& operator<<(internal_ostream& os, std::pair<T1, T2> p)
+    {
+        os << p.first << ": ";
+        os.yaml = true;
+        os << p.second;
+        os.yaml = false;
+        return os;
+    }
+
+    // Complex output
+    template <typename T>
+    friend internal_ostream& operator<<(internal_ostream&     os,
+                                                const rocblas_complex_num<T>& x)
+    {
+        if(os.yaml)
+            os.os << "'(" << std::real(x) << "," << std::imag(x) << ")'";
+        else
+            os.os << x;
+        return os;
+    }
+
+    // Floating-point output
+    friend internal_ostream& operator<<(internal_ostream& os, double x)
+    {
+        if(!os.yaml)
+            os.os << x;
+        else
+        {
+            // For YAML, we must output the floating-point value exactly
+            if(std::isnan(x))
+                os.os << ".nan";
+            else if(std::isinf(x))
+                os.os << (x < 0 ? "-.inf" : ".inf");
+            else
+            {
+                char s[32];
+                snprintf(s, sizeof(s) - 2, "%.17g", x);
+
+                // If no decimal point or exponent, append .0 to indicate floating point
+                for(char* end = s; *end != '.' && *end != 'e' && *end != 'E'; ++end)
+                {
+                    if(!*end)
+                    {
+                        end[0] = '.';
+                        end[1] = '0';
+                        end[2] = '\0';
+                        break;
+                    }
+                }
+                os.os << s;
+            }
+        }
+        return os;
+    }
+
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_half half)
+    {
+        return os << float(half);
+    }
+
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_bfloat16 bf16)
+    {
+        return os << float(bf16);
+    }
+
+    // Integer output
+    friend internal_ostream& operator<<(internal_ostream& os, int32_t x)
+    {
+        os.os << x;
+        return os;
+    }
+    friend internal_ostream& operator<<(internal_ostream& os, uint32_t x)
+    {
+        os.os << x;
+        return os;
+    }
+    friend internal_ostream& operator<<(internal_ostream& os, int64_t x)
+    {
+        os.os << x;
+        return os;
+    }
+    friend internal_ostream& operator<<(internal_ostream& os, uint64_t x)
+    {
+        os.os << x;
+        return os;
+    }
+
+    // bool output
+    friend internal_ostream& operator<<(internal_ostream& os, bool b)
+    {
+        if(os.yaml)
+            os.os << (b ? "true" : "false");
+        else
+            os.os << (b ? 1 : 0);
+        return os;
+    }
+
+    // Character output
+    friend internal_ostream& operator<<(internal_ostream& os, char c)
+    {
+        if(os.yaml)
+        {
+            char s[]{c, 0};
+            os.os << std::quoted(s, '\'');
+        }
+        else
+            os.os << c;
+        return os;
+    }
+
+    // String output
+    friend internal_ostream& operator<<(internal_ostream& os, const char* s)
+    {
+        if(os.yaml)
+            os.os << std::quoted(s);
+        else
+            os.os << s;
+        return os;
+    }
+
+    friend internal_ostream& operator<<(internal_ostream& os, const std::string& s)
+    {
+        return os << s.c_str();
+    }
+
+    // rocblas_datatype output
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_datatype d)
+    {
+        os.os << rocblas_datatype_string(d);
+        return os;
+    }
+
+    // rocblas_operation output
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                rocblas_operation         trans)
+
+    {
+        return os << rocblas_transpose_letter(trans);
+    }
+
+    // rocblas_fill output
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_fill fill)
+
+    {
+        return os << rocblas_fill_letter(fill);
+    }
+
+    // rocblas_diagonal output
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_diagonal diag)
+
+    {
+        return os << rocblas_diag_letter(diag);
+    }
+
+    // rocblas_side output
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_side side)
+
+    {
+        return os << rocblas_side_letter(side);
+    }
+
+    // rocblas_status output
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_status status)
+    {
+        os.os << rocblas_status_to_string(status);
+        return os;
+    }
+
+    // atomics mode output
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                rocblas_atomics_mode      mode)
+    {
+        os.os << rocblas_atomics_mode_to_string(mode);
+        return os;
+    }
+
+    // gemm flags output
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                rocblas_gemm_flags        flags)
+    {
+        os.os << rocblas_gemm_flags_to_string(flags);
+        return os;
+    }
+
+    // Transfer internal_ostream to std::ostream
+    friend std::ostream& operator<<(std::ostream& os, const internal_ostream& str)
+    {
+        return os << str.str();
+    }
+
+    // Transfer internal_ostream to internal_ostream
+    friend internal_ostream& operator<<(internal_ostream&       os,
+                                                const internal_ostream& str)
+    {
+        return os << str.str();
+    }
+
+    // IO Manipulators
+
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                std::ostream& (*pf)(std::ostream&))
+    {
+        // Turn YAML formatting on or off
+        if(pf == internal_ostream::yaml_on)
+            os.yaml = true;
+        else if(pf == internal_ostream::yaml_off)
+            os.yaml = false;
+        else
+        {
+            // Output the manipulator to the buffer
+            os.os << pf;
+
+            // If the manipulator is std::endl or std::flush, flush the output
+            if(pf == static_cast<std::ostream& (*)(std::ostream&)>(std::endl)
+               || pf == static_cast<std::ostream& (*)(std::ostream&)>(std::flush))
+            {
+                os.flush();
+            }
+        }
+        return os;
+    }
+
+    // YAML Manipulators (only used for their addresses now)
+    static std::ostream& yaml_on(std::ostream& os);
+    static std::ostream& yaml_off(std::ostream& os);
+};
 
 /*! \brief  CPU Timer(in microsecond): synchronize with the default device and return wall time */
 double get_time_us(void)
@@ -33,47 +815,57 @@ rocblas_int query_device_property()
     rocblas_status status = (rocblas_status)hipGetDeviceCount(&device_count);
     if(status != rocblas_status_success)
     {
-        printf("Query device error: cannot get device count \n");
+        rocblas_cerr << "Query device error: cannot get device count" << std::endl;
         return -1;
     }
     else
     {
-        printf("Query device success: there are %d devices \n", device_count);
+        rocblas_cout << "Query device success: there are " << device_count << " devices"
+                     << std::endl;
     }
 
     for(rocblas_int i = 0;; i++)
     {
-        puts("-------------------------------------------------------------------------------");
+        rocblas_cout
+            << "-------------------------------------------------------------------------------"
+            << std::endl;
 
         if(i >= device_count)
-        {
             break;
-        }
 
         hipDeviceProp_t props;
         rocblas_status  status = (rocblas_status)hipGetDeviceProperties(&props, i);
         if(status != rocblas_status_success)
         {
-            printf("Query device error: cannot get device ID %d's property\n", i);
+            rocblas_cerr << "Query device error: cannot get device ID " << i << "'s property"
+                         << std::endl;
         }
         else
         {
-            printf("Device ID %d : %s\n", i, props.name);
-            printf("with %3.1f GB memory, clock rate %dMHz @ computing capability %d.%d \n",
-                   props.totalGlobalMem / 1e9,
-                   (int)(props.clockRate / 1000),
-                   props.major,
-                   props.minor);
-            printf(
+            char buf[320];
+            snprintf(
+                buf,
+                sizeof(buf),
+                "Device ID %d : %s %s\n"
+                "with %3.1f GB memory, max. SCLK %d MHz, max. MCLK %d MHz, compute capability "
+                "%d.%d\n"
                 "maxGridDimX %d, sharedMemPerBlock %3.1f KB, maxThreadsPerBlock %d, warpSize %d\n",
+                i,
+                props.name,
+                props.gcnArchName,
+                props.totalGlobalMem / 1e9,
+                (int)(props.clockRate / 1000),
+                (int)(props.memoryClockRate / 1000),
+                props.major,
+                props.minor,
                 props.maxGridSize[0],
                 props.sharedMemPerBlock / 1e3,
                 props.maxThreadsPerBlock,
                 props.warpSize);
+            rocblas_cout << buf;
         }
     }
-    
-    std::cout << std::endl;
+
     return device_count;
 }
 
@@ -1220,6 +2012,67 @@ public:
     }
 };
 
+class Barrier {
+public:
+    explicit Barrier(std::size_t count = 0) : 
+      m_count(count+1), 
+      m_start(0),
+      m_threshold(count+1) 
+    {
+        for(int i = 0; i<m_count-1; i++)
+            m_ready.push_back(false);
+
+    }
+
+    void init(std::size_t count)
+    {
+        m_ready.clear();
+        m_count = count+1;
+        m_start = 0;
+        m_threshold = count+1;
+        for(int i = 0; i<m_threshold-1; i++)
+            m_ready.push_back(false);
+    }
+
+    void wait(int device = 0) 
+    {
+        std::unique_lock<std::mutex> lLock{m_mutex};
+        auto start = m_start;
+        if (!--m_count) {
+            m_start++;
+            m_count = m_threshold;
+            m_cv.notify_all();
+        } else {
+            m_ready[device] = true;
+            m_cv.wait(lLock, [this, start] { return start != m_start; });
+        }
+    }
+
+    void wait_to_trigger() 
+    {
+        bool loop = true;
+        while(loop)
+        {
+            bool ready = true;
+            for(int i = 0; i<m_ready.size(); i++)
+                if(m_ready[i]==false)
+                    ready = false;
+            asm("");
+            loop = !ready;
+        }
+
+        wait();
+    }
+
+private:
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::size_t m_count;
+    std::size_t m_start;
+    std::size_t m_threshold;
+    std::vector<bool> m_ready;
+};
+
 struct Arguments
 {
     rocblas_int M;
@@ -1531,6 +2384,9 @@ std::string a_file, b_file, c_file, o_file;
 rocblas_int storeInitData;
 rocblas_int storeOutputData;
 rocblas_int device_id;
+rocblas_int multi_device;
+Barrier barrier;
+Barrier hBarrier;
 
 void readArgs(int argc, char* argv[], Arguments& arg)
 {
@@ -1700,8 +2556,8 @@ void readArgs(int argc, char* argv[], Arguments& arg)
         "Flush GPU L2 cache between iterations? 0 = No, 1 = Yes (default: No)")
 
     ("c_equals_d",
-        po::value<rocblas_int>(&arg.c_equals_d)->default_value(0),
-        "is C equal to D? 0 = No, 1 = Yes (default: No)")
+        po::value<rocblas_int>(&arg.c_equals_d)->default_value(1),
+        "is C equal to D? 0 = No, 1 = Yes (default: Yes)")
 
     ("time_each_iter",
         po::value<rocblas_int>(&arg.time_each_iter)->default_value(0),
@@ -1729,6 +2585,14 @@ void readArgs(int argc, char* argv[], Arguments& arg)
     ("device",
         po::value<rocblas_int>(&device_id)->default_value(0),
         "Set default device to be used for subsequent program runs (default: 0)")
+
+    ("multi_device",
+        po::value<rocblas_int>(&multi_device)->default_value(1),
+        "This flag is used to specify how many devices to launch work on simultaneously (default: 1)"
+        "The first x amount of devices will be used. Multiple threads will sync after setup for each device."
+        "Then a rocblas call will be deployed to each device simultaneously and the longest timing duration will be pulled."
+        "Each device will run iters iterations, and total performance will be calculated as combined iterations"
+        "Flag cannot be combined with time_each_iter")
 
     ("help,h", "produces this help message");
 
@@ -1831,9 +2695,19 @@ void readArgs(int argc, char* argv[], Arguments& arg)
     // Device Query
     rocblas_int device_count = query_device_property();
 
-    if(device_count <= device_id)
+    if(device_count <= device_id || device_count < multi_device || (multi_device>1 && device_id))
         throw std::invalid_argument("Invalid Device ID");
-    set_device(device_id);
+
+    if(multi_device>1 && arg.time_each_iter)
+        throw std::invalid_argument("Cannot combine multi_device and time_each_iter");
+
+    if(multi_device > 1)
+    {
+        barrier.init(multi_device);
+        hBarrier.init(multi_device-1);
+    }
+    else
+        set_device(device_id);
 }
 
 template <typename Ti, typename To = Ti>
@@ -1922,21 +2796,28 @@ void storeInitToBin(rocblas_operation transA,
                 std::string       CDataFile,
                 rocblas_int       batch_count)
 {
+    std::string preFix;
+    if(multi_device>1)
+    {
+        int deviceId;
+        hipGetDevice(&deviceId);
+        preFix = "device_" + std::to_string(deviceId) + "_";
+    }
     {
         size_t sz = lda * (transA == rocblas_operation_none ? K : M) * sizeof(Ti) * batch_count;
-        std::ofstream FILE(ADataFile, std::ios::out | std::ofstream::binary);
+        std::ofstream FILE(preFix+ADataFile, std::ios::out | std::ofstream::binary);
         FILE.write(reinterpret_cast<const char*>(&hA[0]), sz);
     }
 
     {
         size_t sz = ldb * (transB == rocblas_operation_none ? N : K) * sizeof(Ti) * batch_count;
-        std::ofstream FILE(BDataFile, std::ios::out | std::ofstream::binary);
+        std::ofstream FILE(preFix+BDataFile, std::ios::out | std::ofstream::binary);
         FILE.write(reinterpret_cast<const char*>(&hB[0]), sz);
     }
 
     {
         size_t        sz = ldc * N * sizeof(To) * batch_count;
-        std::ofstream FILE(CDataFile, std::ios::out | std::ofstream::binary);
+        std::ofstream FILE(preFix+CDataFile, std::ios::out | std::ofstream::binary);
         FILE.write(reinterpret_cast<const char*>(&hC[0]), sz);
     }
 }
@@ -1948,9 +2829,17 @@ void storeOutputToBin(rocblas_int       N,
                 std::string       ODataFile,
                 rocblas_int       batch_count)
 {
+    std::string preFix;
+    if(multi_device>1)
+    {
+        int deviceId;
+        hipGetDevice(&deviceId);
+        preFix = "device_" + std::to_string(deviceId) + "_";
+    }
+
     {
         size_t        sz = ldo * N * sizeof(To) * batch_count;
-        std::ofstream FILE(ODataFile, std::ios::out | std::ofstream::binary);
+        std::ofstream FILE(preFix+ODataFile, std::ios::out | std::ofstream::binary);
         FILE.write(reinterpret_cast<const char*>(&hO[0]), sz);
     }
 }

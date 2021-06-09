@@ -117,7 +117,7 @@ install_blis()
 
 install_blis
 
-if sudo cat /opt/rocm/hip/lib/.hipInfo | grep clang ; then
+if cat /opt/rocm/hip/lib/.hipInfo | grep clang ; then
   CLANG=1
 else
   CLANG=0

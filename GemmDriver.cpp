@@ -1,5 +1,23 @@
 /* ************************************************************************
- * Copyright 2018 Advanced Micro Devices, Inc.
+ * Copyright (c) <2021> Advanced Micro Devices, Inc.
+ *  
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *  
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *  
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
  * ************************************************************************ */
 
 #include "utility.hpp"
@@ -14,7 +32,7 @@
 #endif
 
 template <typename T>
-void BenchGemmStridedBatched(const Arguments& arg)
+void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double,double>> promise)
 {
     rocblas_int M = arg.M;
     rocblas_int N = arg.N;
@@ -49,7 +67,7 @@ void BenchGemmStridedBatched(const Arguments& arg)
     // check here to prevent undefined memory allocation error
     if(M < 0 || N < 0 || K < 0 || lda < A_row || ldb < B_row || ldc < M || batch_count < 0)
     {
-        std::cout << "Invalid sizes...exiting" << std::endl;
+        rocblas_cout << "Invalid sizes...exiting" << std::endl;
         exit(1);
     }
 
@@ -57,6 +75,9 @@ void BenchGemmStridedBatched(const Arguments& arg)
     rocblas_int time_each_iter = arg.time_each_iter || reinit_c;
     double      host_time, cpu_time_used;
     double      rocblas_gflops, cblas_gflops;
+    int         deviceId;
+    if(multi_device>1)
+        hipGetDevice(&deviceId);
 
     double rocblas_error = 0.0;
 
@@ -82,47 +103,71 @@ void BenchGemmStridedBatched(const Arguments& arg)
         return;
     }
 
+    bool vChecks = (arg.unit_check || arg.norm_check);
+    bool transferOutput = (vChecks || storeOutputData);
+
     // Naming: dX is in GPU (device) memory. hK is in CPU (host) memory, plz follow this practice
-    host_vector<T> hA(size_A);
-    host_vector<T> hB(size_B);
-    host_vector<T> hC_1(size_C);
-    host_vector<T> hC_2(size_C);
-    host_vector<T> hC_gold(size_C);
+    static host_vector<T> hA(size_A);
+    static host_vector<T> hB(size_B);
+    static host_vector<T> hC(size_C);
+    host_vector<T> hC_1(transferOutput ? size_C : 0);
+    host_vector<T> hC_2(vChecks ? size_C : 0);
+    host_vector<T> hC_gold(vChecks ? size_C : 0);
     host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
 
     // Initial Data on CPU
-    if(arg.initialization == rocblas_initialization_random_int)
+    if((multi_device>1 && deviceId==0) || multi_device == 1)
     {
-        //  Old
-        rocblas_seedrand();
-        rocblas_init<T>(hA, A_row, A_col, lda, stride_a, batch_count);
-        rocblas_init_alternating_sign<T>(hB, B_row, B_col, ldb, stride_b, batch_count);
-        if(rocblas_isnan(arg.beta))
-            rocblas_init_nan<T>(hC_1, M, N, ldc, stride_c, batch_count);
-        else
-            rocblas_init<T>(hC_1, M, N, ldc, stride_c, batch_count);
-    }
-    else if(arg.initialization == rocblas_initialization_random_narrow)
-    {
-        init_narrow_range_random_gemm<T>(transA,
-                                         transB,
-                                         M,
-                                         N,
-                                         K,
-                                         hA,
-                                         lda,
-                                         stride_a,
-                                         hB,
-                                         ldb,
-                                         stride_b,
-                                         hC_1,
-                                         ldc,
-                                         stride_c,
-                                         batch_count);
-    }
-    else if(arg.initialization == rocblas_initialization_random_broad)
-    {
-        init_broad_range_random_gemm<T>(transA,
+        if(arg.initialization == rocblas_initialization_random_int)
+        {
+            //  Old
+            rocblas_seedrand();
+            rocblas_init<T>(hA, A_row, A_col, lda, stride_a, batch_count);
+            rocblas_init_alternating_sign<T>(hB, B_row, B_col, ldb, stride_b, batch_count);
+            if(rocblas_isnan(arg.beta))
+                rocblas_init_nan<T>(hC, M, N, ldc, stride_c, batch_count);
+            else
+                rocblas_init<T>(hC, M, N, ldc, stride_c, batch_count);
+        }
+        else if(arg.initialization == rocblas_initialization_random_narrow)
+        {
+            init_narrow_range_random_gemm<T>(transA,
+                                            transB,
+                                            M,
+                                            N,
+                                            K,
+                                            hA,
+                                            lda,
+                                            stride_a,
+                                            hB,
+                                            ldb,
+                                            stride_b,
+                                            hC,
+                                            ldc,
+                                            stride_c,
+                                            batch_count);
+        }
+        else if(arg.initialization == rocblas_initialization_random_broad)
+        {
+            init_broad_range_random_gemm<T>(transA,
+                                            transB,
+                                            M,
+                                            N,
+                                            K,
+                                            hA,
+                                            lda,
+                                            stride_a,
+                                            hB,
+                                            ldb,
+                                            stride_b,
+                                            hC,
+                                            ldc,
+                                            stride_c,
+                                            batch_count);
+        }
+        else if(arg.initialization == rocblas_initialization_random_full)
+        {
+            init_full_range_random_gemm<T>(transA,
                                         transB,
                                         M,
                                         N,
@@ -133,100 +178,86 @@ void BenchGemmStridedBatched(const Arguments& arg)
                                         hB,
                                         ldb,
                                         stride_b,
-                                        hC_1,
+                                        hC,
                                         ldc,
                                         stride_c,
                                         batch_count);
+        }
+        else if(arg.initialization == rocblas_initialization_const)
+        {
+            init_constant_gemm<T>(transA,
+                                transB,
+                                M,
+                                N,
+                                K,
+                                hA,
+                                lda,
+                                stride_a,
+                                hB,
+                                ldb,
+                                stride_b,
+                                hC,
+                                ldc,
+                                stride_c,
+                                batch_count,
+                                arg.initVal);
+        }
+        else if(arg.initialization == rocblas_initialization_trig_float)
+        {
+            rocblas_init_sin<T>(hA, A_row, A_col, lda, stride_a, batch_count);
+            rocblas_init_cos<T>(hB, B_row, B_col, ldb, stride_b, batch_count);
+            if(rocblas_isnan(arg.beta))
+                rocblas_init_nan<T>(hC, M, N, ldc, stride_c, batch_count);
+            else
+                rocblas_init_sin<T>(hC, M, N, ldc, stride_c, batch_count);
+        }
+        else if(arg.initialization == rocblas_initialization_hpl)
+        {
+            rocblas_seedrand();
+            rocblas_init_hpl<T>(hA, A_row, A_col, lda, stride_a, batch_count);
+            rocblas_init_hpl<T>(hB, B_row, B_col, ldb, stride_b, batch_count);
+            if(rocblas_isnan(arg.beta))
+                rocblas_init_nan<T>(hC, M, N, ldc, stride_c, batch_count);
+            else
+                rocblas_init_hpl<T>(hC, M, N, ldc, stride_c, batch_count);
+        }
+        else if(arg.initialization == rocblas_initialization_file)
+        {
+            loadFromBin(transA,
+                        transB,
+                        M,
+                        N,
+                        K,
+                        hA,
+                        lda,
+                        a_file,
+                        hB,
+                        ldb,
+                        b_file,
+                        hC,
+                        ldc,
+                        c_file,
+                        batch_count);
+        }
+        hBarrier.wait();
     }
-    else if(arg.initialization == rocblas_initialization_random_full)
-    {
-        init_full_range_random_gemm<T>(transA,
-                                       transB,
-                                       M,
-                                       N,
-                                       K,
-                                       hA,
-                                       lda,
-                                       stride_a,
-                                       hB,
-                                       ldb,
-                                       stride_b,
-                                       hC_1,
-                                       ldc,
-                                       stride_c,
-                                       batch_count);
-    }
-    else if(arg.initialization == rocblas_initialization_const)
-    {
-        init_constant_gemm<T>(transA,
-                              transB,
-                              M,
-                              N,
-                              K,
-                              hA,
-                              lda,
-                              stride_a,
-                              hB,
-                              ldb,
-                              stride_b,
-                              hC_1,
-                              ldc,
-                              stride_c,
-                              batch_count,
-                              arg.initVal);
-    }
-    else if(arg.initialization == rocblas_initialization_trig_float)
-    {
-        rocblas_init_sin<T>(hA, A_row, A_col, lda, stride_a, batch_count);
-        rocblas_init_cos<T>(hB, B_row, B_col, ldb, stride_b, batch_count);
-        if(rocblas_isnan(arg.beta))
-            rocblas_init_nan<T>(hC_1, M, N, ldc, stride_c, batch_count);
-        else
-            rocblas_init_sin<T>(hC_1, M, N, ldc, stride_c, batch_count);
-    }
-    else if(arg.initialization == rocblas_initialization_hpl)
-    {
-        rocblas_seedrand();
-        rocblas_init_hpl<T>(hA, A_row, A_col, lda, stride_a, batch_count);
-        rocblas_init_hpl<T>(hB, B_row, B_col, ldb, stride_b, batch_count);
-        if(rocblas_isnan(arg.beta))
-            rocblas_init_nan<T>(hC_1, M, N, ldc, stride_c, batch_count);
-        else
-            rocblas_init_hpl<T>(hC_1, M, N, ldc, stride_c, batch_count);
-    }
-    else if(arg.initialization == rocblas_initialization_file)
-    {
-        loadFromBin(transA,
-                    transB,
-                    M,
-                    N,
-                    K,
-                    hA,
-                    lda,
-                    a_file,
-                    hB,
-                    ldb,
-                    b_file,
-                    hC_1,
-                    ldc,
-                    c_file,
-                    batch_count);
-    }
+    else
+        hBarrier.wait();
 
     if(storeInitData)
     {
-        storeInitToBin<T,T>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC_1, ldc, c_file, batch_count);
+        storeInitToBin<T,T>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, batch_count);
     }
 
-    hC_2    = hC_1;
-    hC_gold = hC_1;
+    if(vChecks)
+        hC_gold = hC;
     if(reinit_c)
-        hC_orig = hC_1;
+        hC_orig = hC;
 
     // copy data from CPU to device
     CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(T) * size_A, hipMemcpyHostToDevice));
     CHECK_HIP_ERROR(hipMemcpy(dB, hB, sizeof(T) * size_B, hipMemcpyHostToDevice));
-    CHECK_HIP_ERROR(hipMemcpy(dC, hC_1, sizeof(T) * size_C, hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(T) * size_C, hipMemcpyHostToDevice));
 
 #ifdef VALIDATE
     if(arg.norm_check)
@@ -252,13 +283,13 @@ void BenchGemmStridedBatched(const Arguments& arg)
                                                             ldc,
                                                             stride_c,
                                                             batch_count));
-
-        CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+        if(transferOutput)
+            CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
         // ROCBLAS rocblas_pointer_mode_device
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
 
-        CHECK_HIP_ERROR(hipMemcpy(dC, hC_2, sizeof(T) * size_C, hipMemcpyHostToDevice));
+        CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(T) * size_C, hipMemcpyHostToDevice));
         CHECK_HIP_ERROR(hipMemcpy(d_alpha, &h_alpha, sizeof(T), hipMemcpyHostToDevice));
         CHECK_HIP_ERROR(hipMemcpy(d_beta, &h_beta, sizeof(T), hipMemcpyHostToDevice));
 
@@ -280,29 +311,31 @@ void BenchGemmStridedBatched(const Arguments& arg)
                                                             ldc,
                                                             stride_c,
                                                             batch_count));
-
-        CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
-
-        // CPU BLAS
-        cpu_time_used = get_time_us();
-        for(rocblas_int i = 0; i < batch_count; i++)
+        if(vChecks)
         {
-            blis_gemm<T>(transA,
-                         transB,
-                         M,
-                         N,
-                         K,
-                         h_alpha,
-                         hA + stride_a * i,
-                         lda,
-                         hB + stride_b * i,
-                         ldb,
-                         h_beta,
-                         hC_gold + stride_c * i,
-                         ldc);
+            CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+
+            // CPU BLAS
+            cpu_time_used = get_time_us();
+            for(rocblas_int i = 0; i < batch_count; i++)
+            {
+                blis_gemm<T>(transA,
+                            transB,
+                            M,
+                            N,
+                            K,
+                            h_alpha,
+                            hA + stride_a * i,
+                            lda,
+                            hB + stride_b * i,
+                            ldb,
+                            h_beta,
+                            hC_gold + stride_c * i,
+                            ldc);
+            }
+            cpu_time_used = get_time_us() - cpu_time_used;
+            cblas_gflops  = gemm_gflop_count<T>(M, N, K) * batch_count / cpu_time_used * 1e6;
         }
-        cpu_time_used = get_time_us() - cpu_time_used;
-        cblas_gflops  = gemm_gflop_count<T>(M, N, K) * batch_count / cpu_time_used * 1e6;
 
         if(arg.unit_check)
         {
@@ -407,7 +440,13 @@ void BenchGemmStridedBatched(const Arguments& arg)
     }
     else
     {
-        host_time = get_time_us(); // in microseconds
+        std::pair<double,double> times;
+        if(multi_device>1)
+        {
+            usleep(0.5 * 1000000);
+            barrier.wait(deviceId);
+        }
+        times.first = get_time_us(); // in microseconds
         hipEventRecord(start, NULL);
         for(int i = 0; i < number_hot_calls; i++)
         {
@@ -433,8 +472,11 @@ void BenchGemmStridedBatched(const Arguments& arg)
 
         hipEventRecord(stop, NULL);
         hipEventSynchronize(stop);
+        times.second = get_time_us();
+        if(multi_device>1)
+            promise.set_value(times);
         hipEventElapsedTime(&kernel_time, start, stop);
-        host_time = get_time_us() - host_time;
+        host_time = times.second-times.first;
     }
 
     if(storeOutputData)
@@ -445,24 +487,44 @@ void BenchGemmStridedBatched(const Arguments& arg)
 
     rocblas_gflops = gemm_gflop_count<T>(M, N, K) * batch_count * number_hot_calls  / kernel_time * 1e3;
 
-    std::cout << "transA,transB,M,N,K,alpha,lda,stride_a,ldb,stride_b,beta,ldc,stride_c,Batch_"
-                 "Count,rocblas-Gflops,host_time(us),kernel_time(us)"
-              << std::endl;
-
-    std::cout << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << ","
-              << arg.get_alpha<T>() << "," << lda << "," << stride_a << "," << ldb << "," << stride_b << ","
-              << arg.get_beta<T>() << "," << ldc << "," << stride_c << "," << batch_count << "," << rocblas_gflops << ","
-              << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
+    if(multi_device>1)
+    {
+        double host_gflops = gemm_gflop_count<T>(M, N, K) * number_hot_calls / (host_time) * 1e6;
+        std::stringstream msg;
+        msg << "Device " << deviceId << std::endl
+        << "transA,transB,M,N,K,alpha,lda,stride_a,ldb,stride_b,beta,ldc,stride_c,Batch_"
+            "Count,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)" << std::endl
+        << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << "," << arg.get_alpha<T>() 
+        << "," << lda << "," << stride_a << "," << ldb << "," << stride_b << "," << arg.get_beta<T>() 
+        << "," << ldc << "," << stride_c << "," << batch_count << "," << rocblas_gflops << "," << host_gflops << "," 
+        << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
+        rocblas_cout << msg.str();
+    }
+    else
+        rocblas_cout << "transA,transB,M,N,K,alpha,lda,stride_a,ldb,stride_b,beta,ldc,stride_c,Batch_"
+            "Count,rocblas-Gflops,host_time(us),kernel_time(us)" << std::endl
+        << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << "," << arg.get_alpha<T>() 
+        << "," << lda << "," << stride_a << "," << ldb << "," << stride_b << "," << arg.get_beta<T>() 
+        << "," << ldc << "," << stride_c << "," << batch_count << "," << rocblas_gflops << "," 
+        << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
 
     if(arg.norm_check)
     {
-        std::cout << "cblas-Gflops,us,rocblas-error" << std::endl;
-        std::cout << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+        if(multi_device>1)
+        {
+            std::stringstream msg;
+            msg << "Device " << deviceId << std::endl << "cblas-Gflops,us,rocblas-error" << std::endl
+            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+            rocblas_cout << msg.str();
+        }
+        else
+            rocblas_cout << "cblas-Gflops,us,rocblas-error" << std::endl
+            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
 }
 
 template <typename Ti, typename To, typename Tc>
-void BenchGemmEx(Arguments& arg)
+void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
 {
     rocblas_gemm_algo algo           = static_cast<rocblas_gemm_algo>(arg.algo);
     int32_t           solution_index = arg.solution_index;
@@ -480,9 +542,14 @@ void BenchGemmEx(Arguments& arg)
     rocblas_int c_equals_d = arg.c_equals_d;
     rocblas_int time_each_iter = arg.time_each_iter || reinit_c || arg.flush_gpu_cache;
     rocblas_int tensile_timing = arg.tensile_timing;
+
     double      host_time, cpu_time_used;
     double      rocblas_gflops, cblas_gflops;
     double      rocblas_error = 0.0;
+    int         deviceId;
+
+    if(multi_device>1)
+        hipGetDevice(&deviceId);
 
     rocblas_local_handle handle;
     auto                 transA = char2rocblas_operation(arg.transA);
@@ -500,7 +567,7 @@ void BenchGemmEx(Arguments& arg)
            && (K % 4 != 0 || (transA != rocblas_operation_none && lda % 4 != 0)
                || (transB == rocblas_operation_none && ldb % 4 != 0))))
     {
-        std::cout << "Invalid sizes...exiting" << std::endl;
+        rocblas_cout << "Invalid sizes...exiting" << std::endl;
         exit(1);
     }
 
@@ -522,121 +589,187 @@ void BenchGemmEx(Arguments& arg)
         return;
     }
 
+    bool vChecks = (arg.unit_check || arg.norm_check);
+    bool transferOutput = (vChecks || storeOutputData);
+
     // Naming: dX is in GPU (device) memory. hK is in CPU (host) memory
-    host_vector<Ti> hA(size_A);
-    host_vector<Ti> hB(size_B);
-    host_vector<To> hC(size_C);
-    host_vector<To> hC_1(size_C);
-    host_vector<To> hC_2(size_C);
-    host_vector<To> hC_gold(size_C);
+    static host_vector<Ti> hA(size_A);
+    static host_vector<Ti> hB(size_B);
+    static host_vector<To> hC(size_C);
+    host_vector<To> hC_1(transferOutput ? size_C : 0);
+    host_vector<To> hC_2(vChecks ? size_C : 0);
+    host_vector<To> hC_gold(vChecks ? size_C : 0);
     host_vector<To> hD_1(size_D);
     host_vector<To> hD_2(size_D);
-    host_vector<To> hD_gold(size_D);
+    host_vector<To> hD_gold(vChecks ? size_D : 0);
     host_vector<To> hC_orig(arg.reinit_c ? size_C : 0);
 
-    if(arg.initialization == rocblas_initialization_random_int)
+    if((multi_device>1 && deviceId==0) || multi_device == 1)
     {
-        //  Old
-        rocblas_seedrand();
-        rocblas_init<Ti>(hA, A_row, A_col, lda);
-        rocblas_init_alternating_sign<Ti>(hB, B_row, B_col, ldb);
-        if(nantest)
-            rocblas_init_nan<To>(hC, M, N, ldc);
-        else
-            rocblas_init<To>(hC, M, N, ldc);
+        if(arg.initialization == rocblas_initialization_random_int)
+        {
+            //  Old
+            rocblas_seedrand();
+            rocblas_init<Ti>(hA, A_row, A_col, lda);
+            rocblas_init_alternating_sign<Ti>(hB, B_row, B_col, ldb);
+            if(nantest)
+                rocblas_init_nan<To>(hC, M, N, ldc);
+            else
+                rocblas_init<To>(hC, M, N, ldc);
+        }
+        else if(arg.initialization == rocblas_initialization_random_narrow)
+        {
+            init_narrow_range_random_gemm<Ti,To>(transA,
+                                            transB,
+                                            M,
+                                            N,
+                                            K,
+                                            hA,
+                                            lda,
+                                            size_A,
+                                            hB,
+                                            ldb,
+                                            size_B,
+                                            hC,
+                                            ldc,
+                                            size_C);
+        }
+        else if(arg.initialization == rocblas_initialization_random_broad)
+        {
+            init_broad_range_random_gemm<Ti,To>(transA,
+                                            transB,
+                                            M,
+                                            N,
+                                            K,
+                                            hA,
+                                            lda,
+                                            size_A,
+                                            hB,
+                                            ldb,
+                                            size_B,
+                                            hC,
+                                            ldc,
+                                            size_C);
+        }
+        else if(arg.initialization == rocblas_initialization_random_full)
+        {
+            init_full_range_random_gemm<Ti,To>(transA,
+                                            transB,
+                                            M,
+                                            N,
+                                            K,
+                                            hA,
+                                            lda,
+                                            size_A,
+                                            hB,
+                                            ldb,
+                                            size_B,
+                                            hC,
+                                            ldc,
+                                            size_C);
+        }
+        else if(arg.initialization == rocblas_initialization_const)
+        {
+            init_constant_gemm<Ti,To>(transA,
+                                transB,
+                                M,
+                                N,
+                                K,
+                                hA,
+                                lda,
+                                size_A,
+                                hB,
+                                ldb,
+                                size_B,
+                                hC,
+                                ldc,
+                                size_C,
+                                Ti(arg.initVal));
+        }
+        else if(arg.initialization == rocblas_initialization_trig_float)
+        {
+            rocblas_init_sin<Ti>(hA, A_row, A_col, lda);
+            rocblas_init_cos<Ti>(hB, B_row, B_col, ldb);
+            if(rocblas_isnan(arg.beta))
+                rocblas_init_nan<To>(hC, M, N, ldc);
+            else
+                rocblas_init_sin<To>(hC, M, N, ldc);
+        }
+        else if(arg.initialization == rocblas_initialization_hpl)
+        {
+            rocblas_seedrand();
+            rocblas_init_hpl<Ti>(hA, A_row, A_col, lda);
+            rocblas_init_hpl<Ti>(hB, B_row, B_col, ldb);
+            if(rocblas_isnan(arg.beta))
+                rocblas_init_nan<To>(hC, M, N, ldc);
+            else
+                rocblas_init_hpl<To>(hC, M, N, ldc);
+        }
+        else if(arg.initialization == rocblas_initialization_file)
+        {
+            loadFromBin<Ti,To>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
+        }
+
+        if(std::is_same<To, rocblas_half>{} && std::is_same<Tc, float>{})
+        {
+            // half precision IEEE has max and lowest values 65504 and -65504,
+            // float precision IEEE has max and lowest values 3.403e+38 and -3.403e+38
+            // the following will overflow to inf in half arithmetic,
+            // but it will equal zero in float arithmetic   65504 * 2 - 65504 * 2
+            //
+            // set matrix A and matrix B upper left block to values below to cause
+            // inf overflow with 16 bit arithmetic, but no overflow for 32 bit arithmetic
+            //
+            // 65500 65500             2   -2
+            // 65500 65500            -2    2
+            //
+            const rocblas_half ieee_half_near_max(65504.0 - 4.0);
+            const rocblas_half positive_two(2.0);
+            const rocblas_half negative_two(-2.0);
+            if(M >= 2 && N >= 2 && K >= 2)
+            {
+                hA[0]       = Ti(ieee_half_near_max);
+                hA[1]       = Ti(ieee_half_near_max);
+                hA[lda]     = Ti(ieee_half_near_max);
+                hA[lda + 1] = Ti(ieee_half_near_max);
+                hB[0]       = Ti(positive_two);
+                hB[1]       = Ti(negative_two);
+                hB[ldb]     = Ti(negative_two);
+                hB[ldb + 1] = Ti(positive_two);
+            }
+        }
+        else if(std::is_same<Ti, rocblas_bfloat16>{} && std::is_same<Tc, float>{})
+        {
+            // half precision IEEE has max and lowest values 65504 and -65504,
+            // float precision IEEE has max and lowest values 3.403e+38 and -3.403e+38
+            // the following will overflow to inf in half arithmetic,
+            // but it will equal zero in float arithmetic   65504 * 2 - 65504 * 2
+            //
+            // set matrix A and matrix B upper left block to values below to cause
+            // inf overflow with 16 bit arithmetic, but no overflow for 32 bit arithmetic
+            //
+            // 65500 65500             2   -2
+            // 65500 65500            -2    2
+            //
+            const float ieee_half_near_max = 65504.0f - 4.0f;
+            const float positive_two       = 2.0f;
+            const float negative_two       = -2.0f;
+            if(M >= 2 && N >= 2 && K >= 2)
+            {
+                hA[0]       = Ti(ieee_half_near_max);
+                hA[1]       = Ti(ieee_half_near_max);
+                hA[lda]     = Ti(ieee_half_near_max);
+                hA[lda + 1] = Ti(ieee_half_near_max);
+                hB[0]       = Ti(positive_two);
+                hB[1]       = Ti(negative_two);
+                hB[ldb]     = Ti(negative_two);
+                hB[ldb + 1] = Ti(positive_two);
+            }
+        }
+        hBarrier.wait();
     }
-    else if(arg.initialization == rocblas_initialization_random_narrow)
-    {
-        init_narrow_range_random_gemm<Ti,To>(transA,
-                                          transB,
-                                          M,
-                                          N,
-                                          K,
-                                          hA,
-                                          lda,
-                                          size_A,
-                                          hB,
-                                          ldb,
-                                          size_B,
-                                          hC,
-                                          ldc,
-                                          size_C);
-    }
-    else if(arg.initialization == rocblas_initialization_random_broad)
-    {
-        init_broad_range_random_gemm<Ti,To>(transA,
-                                         transB,
-                                         M,
-                                         N,
-                                         K,
-                                         hA,
-                                         lda,
-                                         size_A,
-                                         hB,
-                                         ldb,
-                                         size_B,
-                                         hC,
-                                         ldc,
-                                         size_C);
-    }
-    else if(arg.initialization == rocblas_initialization_random_full)
-    {
-        init_full_range_random_gemm<Ti,To>(transA,
-                                        transB,
-                                        M,
-                                        N,
-                                        K,
-                                        hA,
-                                        lda,
-                                        size_A,
-                                        hB,
-                                        ldb,
-                                        size_B,
-                                        hC,
-                                        ldc,
-                                        size_C);
-    }
-    else if(arg.initialization == rocblas_initialization_const)
-    {
-        init_constant_gemm<Ti,To>(transA,
-                               transB,
-                               M,
-                               N,
-                               K,
-                               hA,
-                               lda,
-                               size_A,
-                               hB,
-                               ldb,
-                               size_B,
-                               hC,
-                               ldc,
-                               size_C,
-                               Ti(arg.initVal));
-    }
-    else if(arg.initialization == rocblas_initialization_trig_float)
-    {
-        rocblas_init_sin<Ti>(hA, A_row, A_col, lda);
-        rocblas_init_cos<Ti>(hB, B_row, B_col, ldb);
-        if(rocblas_isnan(arg.beta))
-            rocblas_init_nan<To>(hC, M, N, ldc);
-        else
-            rocblas_init_sin<To>(hC, M, N, ldc);
-    }
-    else if(arg.initialization == rocblas_initialization_hpl)
-    {
-        rocblas_seedrand();
-        rocblas_init_hpl<Ti>(hA, A_row, A_col, lda);
-        rocblas_init_hpl<Ti>(hB, B_row, B_col, ldb);
-        if(rocblas_isnan(arg.beta))
-            rocblas_init_nan<To>(hC, M, N, ldc);
-        else
-            rocblas_init_hpl<To>(hC, M, N, ldc);
-    }
-    else if(arg.initialization == rocblas_initialization_file)
-    {
-        loadFromBin<Ti,To>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
-    }
+    else
+        hBarrier.wait();
 
     if(storeInitData)
     {
@@ -645,67 +778,13 @@ void BenchGemmEx(Arguments& arg)
 
     if(!c_equals_d)
         rocblas_init<To>(hD_1, M, N, ldd);
-
-    if(std::is_same<To, rocblas_half>{} && std::is_same<Tc, float>{})
-    {
-        // half precision IEEE has max and lowest values 65504 and -65504,
-        // float precision IEEE has max and lowest values 3.403e+38 and -3.403e+38
-        // the following will overflow to inf in half arithmetic,
-        // but it will equal zero in float arithmetic   65504 * 2 - 65504 * 2
-        //
-        // set matrix A and matrix B upper left block to values below to cause
-        // inf overflow with 16 bit arithmetic, but no overflow for 32 bit arithmetic
-        //
-        // 65500 65500             2   -2
-        // 65500 65500            -2    2
-        //
-        const rocblas_half ieee_half_near_max(65504.0 - 4.0);
-        const rocblas_half positive_two(2.0);
-        const rocblas_half negative_two(-2.0);
-        if(M >= 2 && N >= 2 && K >= 2)
-        {
-            hA[0]       = Ti(ieee_half_near_max);
-            hA[1]       = Ti(ieee_half_near_max);
-            hA[lda]     = Ti(ieee_half_near_max);
-            hA[lda + 1] = Ti(ieee_half_near_max);
-            hB[0]       = Ti(positive_two);
-            hB[1]       = Ti(negative_two);
-            hB[ldb]     = Ti(negative_two);
-            hB[ldb + 1] = Ti(positive_two);
-        }
-    }
-    else if(std::is_same<Ti, rocblas_bfloat16>{} && std::is_same<Tc, float>{})
-    {
-        // half precision IEEE has max and lowest values 65504 and -65504,
-        // float precision IEEE has max and lowest values 3.403e+38 and -3.403e+38
-        // the following will overflow to inf in half arithmetic,
-        // but it will equal zero in float arithmetic   65504 * 2 - 65504 * 2
-        //
-        // set matrix A and matrix B upper left block to values below to cause
-        // inf overflow with 16 bit arithmetic, but no overflow for 32 bit arithmetic
-        //
-        // 65500 65500             2   -2
-        // 65500 65500            -2    2
-        //
-        const float ieee_half_near_max = 65504.0f - 4.0f;
-        const float positive_two       = 2.0f;
-        const float negative_two       = -2.0f;
-        if(M >= 2 && N >= 2 && K >= 2)
-        {
-            hA[0]       = Ti(ieee_half_near_max);
-            hA[1]       = Ti(ieee_half_near_max);
-            hA[lda]     = Ti(ieee_half_near_max);
-            hA[lda + 1] = Ti(ieee_half_near_max);
-            hB[0]       = Ti(positive_two);
-            hB[1]       = Ti(negative_two);
-            hB[ldb]     = Ti(negative_two);
-            hB[ldb + 1] = Ti(positive_two);
-        }
-    }
-
     hD_2    = hD_1;
-    hD_gold = hD_1;
-    hC_gold = hC;
+
+    if(vChecks)
+    {
+        hD_gold = hD_1;
+        hC_gold = hC;
+    }
     if(reinit_c)
         hC_orig = hC;
 
@@ -768,18 +847,26 @@ void BenchGemmEx(Arguments& arg)
                                             arg.compute_type,
                                             algo,
                                             solution_index,
-                                            flags));
+                                            flags));                     
 
-        CHECK_HIP_ERROR(hipMemcpy(hD_1, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
-        CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
+        if(transferOutput)
+        {
+            if(c_equals_d)
+                CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
+            else
+                CHECK_HIP_ERROR(hipMemcpy(hD_1, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
+        }
 
         // ROCBLAS rocblas_pointer_mode_device
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
-        CHECK_HIP_ERROR(hipMemcpy(dD, hD_2, sizeof(To) * size_D, hipMemcpyHostToDevice));
         CHECK_HIP_ERROR(hipMemcpy(d_alpha_Tc, &h_alpha_Tc, sizeof(Tc), hipMemcpyHostToDevice));
         CHECK_HIP_ERROR(hipMemcpy(d_beta_Tc, &h_beta_Tc, sizeof(Tc), hipMemcpyHostToDevice));
+
         if(c_equals_d)
             CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(To) * size_C, hipMemcpyHostToDevice));
+        else
+            CHECK_HIP_ERROR(hipMemcpy(dD, hD_2, sizeof(To) * size_D, hipMemcpyHostToDevice));
+
         CHECK_ROCBLAS_ERROR(rocblas_gemm_ex(handle,
                                             transA,
                                             transB,
@@ -804,27 +891,36 @@ void BenchGemmEx(Arguments& arg)
                                             algo,
                                             solution_index,
                                             flags));
-        CHECK_HIP_ERROR(hipMemcpy(hD_2, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
-        CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
-        // CPU BLAS
-        // copy C matrix into D matrix
-        if(!c_equals_d)
+        if(vChecks)
         {
-            for(int i2 = 0; i2 < N; i2++)
+            if(c_equals_d)
+                CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
+            else
+                CHECK_HIP_ERROR(hipMemcpy(hD_2, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
+        }
+
+        if(vChecks)
+        {
+            // CPU BLAS
+            // copy C matrix into D matrix
+            if(!c_equals_d)
             {
-                for(int i1 = 0; i1 < M; i1++)
+                for(int i2 = 0; i2 < N; i2++)
                 {
-                    hD_gold[i1 + i2 * ldd] = hC[i1 + i2 * ldc];
+                    for(int i1 = 0; i1 < M; i1++)
+                    {
+                        hD_gold[i1 + i2 * ldd] = hC[i1 + i2 * ldc];
+                    }
                 }
             }
-        }
-        cpu_time_used = get_time_us();
-        blis_gemm<Ti,To,Tc>(
-            transA, transB, M, N, K, h_alpha_Tc, hA, lda, hB, ldb, h_beta_Tc, c_equals_d ? hC_gold : hD_gold, c_equals_d ? ldc : ldd);
-        //if C does not equal D check if C changed
+            cpu_time_used = get_time_us();
+            blis_gemm<Ti,To,Tc>(
+                transA, transB, M, N, K, h_alpha_Tc, hA, lda, hB, ldb, h_beta_Tc, c_equals_d ? hC_gold : hD_gold, c_equals_d ? ldc : ldd);
+            //if C does not equal D check if C changed
 
-        cpu_time_used = get_time_us() - cpu_time_used;
-        cblas_gflops  = gemm_gflop_count<To>(M, N, K) / cpu_time_used * 1e6;
+            cpu_time_used = get_time_us() - cpu_time_used;
+            cblas_gflops  = gemm_gflop_count<To>(M, N, K) / cpu_time_used * 1e6;
+        }
 
         if(arg.unit_check)
         {
@@ -838,8 +934,11 @@ void BenchGemmEx(Arguments& arg)
                     near_check_general<To>(M, N, ldd, hD_gold, hD_1, tol);
                     near_check_general<To>(M, N, ldd, hD_gold, hD_2, tol);
                 }
-                unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
-                unit_check_general<To>(M, N, ldc, hC_gold, hC_2);
+                else
+                {
+                    unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
+                    unit_check_general<To>(M, N, ldc, hC_gold, hC_2);
+                }
             }
             else
             {
@@ -848,24 +947,30 @@ void BenchGemmEx(Arguments& arg)
                     unit_check_general<To>(M, N, ldd, hD_gold, hD_1);
                     unit_check_general<To>(M, N, ldd, hD_gold, hD_2);
                 }
-                unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
-                unit_check_general<To>(M, N, ldc, hC_gold, hC_2);
+                else
+                {
+                    unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
+                    unit_check_general<To>(M, N, ldc, hC_gold, hC_2);
+                }
             }
         }
 
         if(arg.norm_check)
         {
             auto errD = 0.0;
+            auto errC = 0.0;
             if(!c_equals_d)
             {
                 auto err1 = fabs(norm_check_general<To>('F', M, N, ldd, hD_gold, hD_1));
                 auto err2 = fabs(norm_check_general<To>('F', M, N, ldd, hD_gold, hD_2));
                 auto errD = err1 > err2 ? err1 : err2;
             }
-
-            auto err3 = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_1));
-            auto err4 = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_2));
-            auto errC = err3 > err4 ? err3 : err4;
+            else
+            {
+                auto err3 = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_1));
+                auto err4 = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_2));
+                errC = err3 > err4 ? err3 : err4;
+            }
 
             rocblas_error = errD > errC ? errD : errC;
         }
@@ -970,9 +1075,14 @@ void BenchGemmEx(Arguments& arg)
     }
     else
     {
+        std::pair<double,double> times;
+        if(multi_device>1)
+        {
+            usleep(0.5 * 1000000);
+            barrier.wait(deviceId);
+        }
+        times.first = get_time_us(); // in microseconds
         hipEventRecord(start[numEvents-1], NULL);
-        host_time = get_time_us(); // in microseconds
-
         for(int i = 0; i < number_hot_calls; i++)
         {
             ROCBLAS_INVOKE_START_STOP_EVENTS(handle, tensile_timing ? start[i]: nullptr, tensile_timing ? stop[i] : nullptr,
@@ -1005,7 +1115,10 @@ void BenchGemmEx(Arguments& arg)
         hipEventRecord(stop[numEvents-1], NULL);
         hipEventSynchronize(stop[numEvents-1]);
 
-        host_time = get_time_us() - host_time;
+        times.second = get_time_us();
+        if(multi_device>1)
+            promise.set_value(times);
+        host_time = times.second-times.first;
         for(int i=0; i<numEvents-1;i++)
         {
             hipEventElapsedTime(&kernel_time_iter, start[i], stop[i]);
@@ -1022,35 +1135,68 @@ void BenchGemmEx(Arguments& arg)
     }
 
     rocblas_gflops = gemm_gflop_count<Ti>(M, N, K) * number_hot_calls / (tensile_timing ? tensile_time : kernel_time) * 1e3;
+    double host_gflops = gemm_gflop_count<Ti>(M, N, K) * number_hot_calls / (host_time) * 1e6;
 
     if(tensile_timing)
     {
-        std::cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" 
-        << ",tensile_time(us)" << std::endl;
-        std::cout << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
-                  << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
-                  << "," << arg.beta << "," << ldc << "," << rocblas_gflops << ","
-                  << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << ","
-                  << tensile_time/number_hot_calls*1000 << std::endl;    
+        if(multi_device>1)
+        {
+            std::stringstream msg;
+            msg << "Device " << deviceId << std::endl
+            << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)" 
+            << ",tensile_time(us)" << std::endl << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
+            << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
+            << "," << arg.beta << "," << ldc << "," << rocblas_gflops << "," << host_gflops << ","
+            << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << ","
+            << tensile_time/number_hot_calls*1000 << std::endl;
+            rocblas_cout << msg.str();
+        }
+        else
+            rocblas_cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" 
+            << ",tensile_time(us)" << std::endl << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
+            << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
+            << "," << arg.beta << "," << ldc << "," << rocblas_gflops << ","
+            << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << ","
+            << tensile_time/number_hot_calls*1000 << std::endl;    
     }
     else
     {
-        std::cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)"<< std::endl;
-        std::cout << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
-                  << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
-                  << "," << arg.beta << "," << ldc << "," << rocblas_gflops << ","
-                  << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
+        if(multi_device>1)
+        {
+            std::stringstream msg;
+            msg << "Device " << deviceId << std::endl
+            << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)"<< std::endl
+            << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
+            << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
+            << "," << arg.beta << "," << ldc << "," << rocblas_gflops << "," << host_gflops << ","
+            << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
+            rocblas_cout << msg.str();
+        }
+        else
+            rocblas_cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)"<< std::endl
+                << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
+            << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
+            << "," << arg.beta << "," << ldc << "," << rocblas_gflops  << ","
+            << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
     }
 
     if(arg.norm_check)
     {
-        std::cout << "cblas-Gflops,us,rocblas-error" << std::endl;
-        std::cout << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+        if(multi_device>1)
+        {
+            std::stringstream msg;
+            msg << "Device " << deviceId << std::endl << "cblas-Gflops,us,rocblas-error" << std::endl
+            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+            rocblas_cout << msg.str();
+        }
+        else
+            rocblas_cout << "cblas-Gflops,us,rocblas-error" << std::endl
+            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
 }
 
 template <typename T>
-void BenchGemm(Arguments& arg)
+void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
 {
     rocblas_operation transA = char2rocblas_operation(arg.transA);
     rocblas_operation transB = char2rocblas_operation(arg.transB);
@@ -1072,6 +1218,9 @@ void BenchGemm(Arguments& arg)
     double               rocblas_gflops, cblas_gflops;
     double               rocblas_error = 0.0;
     rocblas_local_handle handle;
+    int deviceId;
+    if(multi_device>1)
+        hipGetDevice(&deviceId);
 
     rocblas_int A_row = transA == rocblas_operation_none ? M : K;
     rocblas_int A_col = transA == rocblas_operation_none ? K : M;
@@ -1081,7 +1230,7 @@ void BenchGemm(Arguments& arg)
     // check here to prevent undefined memory allocation error
     if(M < 0 || N < 0 || K < 0 || lda < A_row || ldb < B_row || ldc < M)
     {
-        std::cout << "Invalid sizes...exiting" << std::endl;
+        rocblas_cout << "Invalid sizes...exiting" << std::endl;
         exit(1);
     }
 
@@ -1101,97 +1250,107 @@ void BenchGemm(Arguments& arg)
         return;
     }
 
+    bool vChecks = (arg.unit_check || arg.norm_check);
+    bool transferOutput = (vChecks || storeOutputData);
+
     // Naming: dX is in GPU (device) memory. hK is in CPU (host) memory
-    host_vector<T> hA(size_A);
-    host_vector<T> hB(size_B);
-    host_vector<T> hC_1(size_C);
-    host_vector<T> hC_2(size_C);
-    host_vector<T> hC_gold(size_C);
+    static host_vector<T> hA(size_A);
+    static host_vector<T> hB(size_B);
+    static host_vector<T> hC(size_C);
+    host_vector<T> hC_1(transferOutput ? size_C : 0);
+    host_vector<T> hC_2(vChecks ? size_C : 0);
+    host_vector<T> hC_gold(vChecks ? size_C : 0);
     host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
     // Initial Data on CPU
-    if(arg.initialization == rocblas_initialization_random_int)
+    if((multi_device>1 && deviceId==0) || multi_device == 1)
     {
-        //  Old
-        rocblas_seedrand();
-        rocblas_init<T>(hA, A_row, A_col, lda);
-        rocblas_init_alternating_sign<T>(hB, B_row, B_col, ldb);
-        if(rocblas_isnan(arg.beta) || rocblas_isnan(arg.betai))
-            rocblas_init_nan<T>(hC_1, M, N, ldc);
-        else
-            rocblas_init<T>(hC_1, M, N, ldc);
+        if(arg.initialization == rocblas_initialization_random_int)
+        {
+            //  Old
+            rocblas_seedrand();
+            rocblas_init<T>(hA, A_row, A_col, lda);
+            rocblas_init_alternating_sign<T>(hB, B_row, B_col, ldb);
+            if(rocblas_isnan(arg.beta) || rocblas_isnan(arg.betai))
+                rocblas_init_nan<T>(hC, M, N, ldc);
+            else
+                rocblas_init<T>(hC, M, N, ldc);
+        }
+        else if(arg.initialization == rocblas_initialization_random_narrow)
+        {
+            init_narrow_range_random_gemm<T>(
+                transA, transB, M, N, K, hA, lda, size_A, hB, ldb, size_B, hC, ldc, size_C);
+        }
+        else if(arg.initialization == rocblas_initialization_random_broad)
+        {
+            init_broad_range_random_gemm<T>(
+                transA, transB, M, N, K, hA, lda, size_A, hB, ldb, size_B, hC, ldc, size_C);
+        }
+        else if(arg.initialization == rocblas_initialization_random_full)
+        {
+            init_full_range_random_gemm<T>(
+                transA, transB, M, N, K, hA, lda, size_A, hB, ldb, size_B, hC, ldc, size_C);
+        }
+        else if(arg.initialization == rocblas_initialization_const)
+        {
+            init_constant_gemm<T>(transA,
+                                transB,
+                                M,
+                                N,
+                                K,
+                                hA,
+                                lda,
+                                size_A,
+                                hB,
+                                ldb,
+                                size_B,
+                                hC,
+                                ldc,
+                                size_C,
+                                T(arg.initVal));
+        }
+        else if(arg.initialization == rocblas_initialization_trig_float)
+        {
+            rocblas_init_sin<T>(hA, A_row, A_col, lda);
+            rocblas_init_cos<T>(hB, B_row, B_col, ldb);
+            if(rocblas_isnan(arg.beta) || rocblas_isnan(arg.betai))
+                rocblas_init_nan<T>(hC, M, N, ldc);
+            else
+                rocblas_init_sin<T>(hC, M, N, ldc);
+        }
+        else if(arg.initialization == rocblas_initialization_hpl)
+        {
+            rocblas_seedrand();
+            rocblas_init_hpl<T>(hA, A_row, A_col, lda);
+            rocblas_init_hpl<T>(hB, B_row, B_col, ldb);
+            if(rocblas_isnan(arg.beta) || rocblas_isnan(arg.betai))
+                rocblas_init_nan<T>(hC, M, N, ldc);
+            else
+                rocblas_init_hpl<T>(hC, M, N, ldc);
+        }
+        else if(arg.initialization == rocblas_initialization_file)
+        {
+            loadFromBin(
+                transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
+        }
+        hBarrier.wait();
     }
-    else if(arg.initialization == rocblas_initialization_random_narrow)
-    {
-        init_narrow_range_random_gemm<T>(
-            transA, transB, M, N, K, hA, lda, size_A, hB, ldb, size_B, hC_1, ldc, size_C);
-    }
-    else if(arg.initialization == rocblas_initialization_random_broad)
-    {
-        init_broad_range_random_gemm<T>(
-            transA, transB, M, N, K, hA, lda, size_A, hB, ldb, size_B, hC_1, ldc, size_C);
-    }
-    else if(arg.initialization == rocblas_initialization_random_full)
-    {
-        init_full_range_random_gemm<T>(
-            transA, transB, M, N, K, hA, lda, size_A, hB, ldb, size_B, hC_1, ldc, size_C);
-    }
-    else if(arg.initialization == rocblas_initialization_const)
-    {
-        init_constant_gemm<T>(transA,
-                              transB,
-                              M,
-                              N,
-                              K,
-                              hA,
-                              lda,
-                              size_A,
-                              hB,
-                              ldb,
-                              size_B,
-                              hC_1,
-                              ldc,
-                              size_C,
-                              T(arg.initVal));
-    }
-    else if(arg.initialization == rocblas_initialization_trig_float)
-    {
-        rocblas_init_sin<T>(hA, A_row, A_col, lda);
-        rocblas_init_cos<T>(hB, B_row, B_col, ldb);
-        if(rocblas_isnan(arg.beta) || rocblas_isnan(arg.betai))
-            rocblas_init_nan<T>(hC_1, M, N, ldc);
-        else
-            rocblas_init_sin<T>(hC_1, M, N, ldc);
-    }
-    else if(arg.initialization == rocblas_initialization_hpl)
-    {
-        rocblas_seedrand();
-        rocblas_init_hpl<T>(hA, A_row, A_col, lda);
-        rocblas_init_hpl<T>(hB, B_row, B_col, ldb);
-        if(rocblas_isnan(arg.beta) || rocblas_isnan(arg.betai))
-            rocblas_init_nan<T>(hC_1, M, N, ldc);
-        else
-            rocblas_init_hpl<T>(hC_1, M, N, ldc);
-    }
-    else if(arg.initialization == rocblas_initialization_file)
-    {
-        loadFromBin(
-            transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC_1, ldc, c_file, 1);
-    }
+    else
+        hBarrier.wait();
 
     if(storeInitData)
     {
-        storeInitToBin<T,T>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC_1, ldc, c_file, 1);
+        storeInitToBin<T,T>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
     }
 
-    hC_2    = hC_1;
-    hC_gold = hC_1;
+    if(vChecks)
+        hC_gold = hC;
     if(reinit_c)
-        hC_orig = hC_1;
+        hC_orig = hC;
 
     // copy data from CPU to device
     CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(T) * size_A, hipMemcpyHostToDevice));
     CHECK_HIP_ERROR(hipMemcpy(dB, hB, sizeof(T) * size_B, hipMemcpyHostToDevice));
-    CHECK_HIP_ERROR(hipMemcpy(dC, hC_1, sizeof(T) * size_C, hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(T) * size_C, hipMemcpyHostToDevice));
 
 #ifdef VALIDATE
     if(arg.norm_check)
@@ -1200,35 +1359,41 @@ void BenchGemm(Arguments& arg)
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
         CHECK_ROCBLAS_ERROR(rocblas_gemm<T>(
             handle, transA, transB, M, N, K, &h_alpha, dA, lda, dB, ldb, &h_beta, dC, ldc));
-        CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+
+        if(transferOutput)
+            CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
         // ROCBLAS rocblas_pointer_mode_device
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
-        CHECK_HIP_ERROR(hipMemcpy(dC, hC_2, sizeof(T) * size_C, hipMemcpyHostToDevice));
+        CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(T) * size_C, hipMemcpyHostToDevice));
         CHECK_HIP_ERROR(hipMemcpy(d_alpha, &h_alpha, sizeof(T), hipMemcpyHostToDevice));
         CHECK_HIP_ERROR(hipMemcpy(d_beta, &h_beta, sizeof(T), hipMemcpyHostToDevice));
         CHECK_ROCBLAS_ERROR(rocblas_gemm<T>(
             handle, transA, transB, M, N, K, d_alpha, dA, lda, dB, ldb, d_beta, dC, ldc));
-        CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
-        cpu_time_used = get_time_us();
+        if(vChecks)
+        {
+            CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
-        blis_gemm<T>(transA,
-                     transB,
-                     M,
-                     N,
-                     K,
-                     h_alpha,
-                     hA.data(),
-                     lda,
-                     hB.data(),
-                     ldb,
-                     h_beta,
-                     hC_gold.data(),
-                     ldc);
+            cpu_time_used = get_time_us();
+            
+            blis_gemm<T>(transA,
+                        transB,
+                        M,
+                        N,
+                        K,
+                        h_alpha,
+                        hA.data(),
+                        lda,
+                        hB.data(),
+                        ldb,
+                        h_beta,
+                        hC_gold.data(),
+                        ldc);
 
-        cpu_time_used = get_time_us() - cpu_time_used;
-        cblas_gflops  = gemm_gflop_count<T>(M, N, K) / cpu_time_used * 1e6;
+            cpu_time_used = get_time_us() - cpu_time_used;
+            cblas_gflops  = gemm_gflop_count<T>(M, N, K) / cpu_time_used * 1e6;
+        }
 
         if(arg.unit_check)
         {
@@ -1274,6 +1439,7 @@ void BenchGemm(Arguments& arg)
         rocblas_gemm<T>(
             handle, transA, transB, M, N, K, &h_alpha, dA, lda, dB, ldb, &h_beta, dC, ldc);
     }
+    
 
     if(time_each_iter)
     {
@@ -1299,7 +1465,13 @@ void BenchGemm(Arguments& arg)
     }
     else
     {
-        host_time = get_time_us(); // in microseconds
+        std::pair<double,double> times;
+        if(multi_device>1)
+        {
+            usleep(0.5 * 1000000);
+            barrier.wait(deviceId);
+        }
+        times.first = get_time_us(); // in microseconds
         hipEventRecord(start, NULL);
         for(int i = 0; i < number_hot_calls; i++)
         {
@@ -1309,8 +1481,11 @@ void BenchGemm(Arguments& arg)
 
         hipEventRecord(stop, NULL);
         hipEventSynchronize(stop);
+        times.second = get_time_us();
+        if(multi_device>1)
+            promise.set_value(times);
         hipEventElapsedTime(&kernel_time, start, stop);
-        host_time = get_time_us() - host_time;
+        host_time = times.second-times.first;
     }
 
     if(storeOutputData)
@@ -1321,52 +1496,57 @@ void BenchGemm(Arguments& arg)
 
     rocblas_gflops = gemm_gflop_count<T>(M, N, K) * number_hot_calls / kernel_time * 1e3;
 
-    std::cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" << std::endl;
-
-    std::cout << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << ","
-              << arg.get_alpha<T>() << "," << lda << "," << ldb << "," << arg.get_beta<T>() << "," << ldc
-              << "," << rocblas_gflops << "," << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
+    if(multi_device>1)
+    {
+        double host_gflops = gemm_gflop_count<T>(M, N, K) * number_hot_calls / (host_time) * 1e6;
+        std::stringstream msg;
+        msg << "Device " << deviceId << std::endl
+        << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)" << std::endl
+        << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << ","
+        << arg.get_alpha<T>() << "," << lda << "," << ldb << "," << arg.get_beta<T>() << "," << ldc
+        << "," << rocblas_gflops << "," << host_gflops << "," << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
+        rocblas_cout  << msg.str();
+    }
+    else
+        rocblas_cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" << std::endl
+        << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << ","
+        << arg.get_alpha<T>() << "," << lda << "," << ldb << "," << arg.get_beta<T>() << "," << ldc
+        << "," << rocblas_gflops << "," << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
 
     if(arg.norm_check)
     {
-        std::cout << "cblas-Gflops,us,rocblas-error" << std::endl;
-        std::cout << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+        if(multi_device>1)
+        {
+            std::stringstream msg;
+            msg << "Device " << deviceId << std::endl << "cblas-Gflops,us,rocblas-error" << std::endl
+            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+            rocblas_cout << msg.str();
+        }
+        else
+            rocblas_cout << "cblas-Gflops,us,rocblas-error" << std::endl
+            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
 }
 
-int main(int argc, char* argv[])
+int launch_bench(Arguments& arg, std::promise<std::pair<double,double>> promise)
 {
-
-    Arguments arg;
-    readArgs(argc, argv, arg);
-
-    if(arg.norm_check)
-    {
-#ifdef VALIDATE
-        setup_blis();
-#else
-        std::cout << "run ./install -v 1 to enable validation" << std::endl;
-        exit(1);
-#endif
-    }
-
     if(function == "gemm")
     {
         if(precision == "f32_r" || precision == "s")
         {
-            BenchGemm<float>(arg);
+            BenchGemm<float>(arg, std::move(promise));
         }
         else if(precision == "f64_r" || precision == "d")
         {
-            BenchGemm<double>(arg);
+            BenchGemm<double>(arg, std::move(promise));
         }
         else if(precision == "f16_r")
         {
-            BenchGemm<rocblas_half>(arg);
+            BenchGemm<rocblas_half>(arg, std::move(promise));
         }
         else
         {
-            std::cout << "Precision not implemented, exiting";
+            rocblas_cout << "Precision not implemented, exiting";
             return rocblas_status_not_implemented;
         }
     }
@@ -1374,19 +1554,19 @@ int main(int argc, char* argv[])
     {
         if(precision == "f32_r" || precision == "s")
         {
-            BenchGemmStridedBatched<float>(arg);
+            BenchGemmStridedBatched<float>(arg, std::move(promise));
         }
         else if(precision == "f64_r" || precision == "d")
         {
-            BenchGemmStridedBatched<double>(arg);
+            BenchGemmStridedBatched<double>(arg, std::move(promise));
         }
         else if(precision == "f16_r")
         {
-            BenchGemmStridedBatched<rocblas_half>(arg);
+            BenchGemmStridedBatched<rocblas_half>(arg, std::move(promise));
         }
         else
         {
-            std::cout << "Precision not implemented, exiting";
+            rocblas_cout << "Precision not implemented, exiting";
             return rocblas_status_not_implemented;
         }
     }
@@ -1395,44 +1575,130 @@ int main(int argc, char* argv[])
         if((a_type == "f64_r" || a_type == "d") && (b_type == "f64_r" || b_type == "d")
            && (c_type == "f64_r" || c_type == "d") && (d_type == "f64_r" || d_type == "d")
            && (compute_type == "f64_r" || compute_type == "d"))
-        {
-            BenchGemmEx<double, double, double>(arg);
+        {   
+            BenchGemmEx<double, double, double>(arg, std::move(promise));
         }
         else if((a_type == "f32_r" || a_type == "s") && (b_type == "f32_r" || b_type == "s")
                 && (c_type == "f32_r" || c_type == "s") && (d_type == "f32_r" || d_type == "s")
                 && (compute_type == "f32_r" || compute_type == "s"))
         {
-            BenchGemmEx<float, float, float>(arg);
+            BenchGemmEx<float, float, float>(arg, std::move(promise));
         }
         else if((a_type == "bf16_r") && (b_type == "bf16_r")
                 && (c_type == "bf16_r") && (d_type == "bf16_r")
                 && (compute_type == "f32_r" || compute_type == "s"))
         {
-            BenchGemmEx<rocblas_bfloat16, rocblas_bfloat16, float>(arg);
+            BenchGemmEx<rocblas_bfloat16, rocblas_bfloat16, float>(arg, std::move(promise));
         }
         else if(a_type == "f16_r"  && b_type == "f16_r"
                 && c_type == "f16_r" && d_type == "f16_r"
                 && compute_type == "f16_r")
         {
-            BenchGemmEx<rocblas_half, rocblas_half, rocblas_half>(arg);
+            BenchGemmEx<rocblas_half, rocblas_half, rocblas_half>(arg, std::move(promise));
         }
         else if(a_type == "f16_r"  && b_type == "f16_r"
                 && c_type == "f16_r" && d_type == "f16_r"
                 && (compute_type == "f32_r" || compute_type == "s"))
         {
-            BenchGemmEx<rocblas_half, rocblas_half, float>(arg);
+            BenchGemmEx<rocblas_half, rocblas_half, float>(arg, std::move(promise));
         }
         else
         {
-            std::cout << "Precision not implemented, exiting";
+            rocblas_cout << "Precision not implemented, exiting";
             return rocblas_status_not_implemented;
         }
     }
     else
     {
-        std::cout << "Function not implemented, exiting";
+        rocblas_cout << "Function not implemented, exiting";
         return rocblas_status_not_implemented;
     }
+
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+
+    Arguments arg;
+    readArgs(argc, argv, arg);
+
+    if(arg.norm_check || arg.unit_check)
+    {
+#ifdef VALIDATE
+        setup_blis();
+#else
+        rocblas_cout << "run ./install -v 1 to enable validation" << std::endl;
+        exit(1);
+#endif
+    }
+
+    auto promise = std::make_unique<std::promise<std::pair<double,double>>[]>(multi_device);
+
+    if(multi_device>1)
+    {
+        std::vector<std::thread> threads;
+        auto future  = std::make_unique<std::future<std::pair<double,double>>[]>(multi_device);
+
+        for(size_t i = 0; i < multi_device; ++i)
+            future[i] = promise[i].get_future();
+
+        for(int i = 0 ; i<multi_device; ++i)
+            threads.push_back(std::thread([&, i] { set_device(i); launch_bench(arg, std::move(promise[i])); }));
+
+        barrier.wait_to_trigger();
+
+        std::vector<std::pair<double,double>> times(multi_device);
+
+        //wait for promises
+        for(size_t i = 0; i < multi_device; ++i)
+            times[i] = future[i].get(); 
+
+        double start=times[0].first;
+        double end=times[0].second;
+
+        for(int i =0; i<multi_device; i++)
+        {
+            if(times[i].first < start)
+                start = times[i].first;
+            if(times[i].second > end)
+                end = times[i].second;
+        }
+
+        for(int i =0; i<multi_device; i++)
+            threads[i].join();
+
+        //print overall run data
+        double overall_time = (end-start)/arg.iters;
+
+        double overall_gflops;
+        if(arg.d_type == rocblas_datatype_f16_r)
+            overall_gflops = gemm_gflop_count<rocblas_half>(arg.M, arg.N, arg.K);
+        else if(arg.d_type == rocblas_datatype_bf16_r)
+            overall_gflops = gemm_gflop_count<rocblas_bfloat16>(arg.M, arg.N, arg.K);
+        else if(arg.d_type == rocblas_datatype_f32_r)
+            overall_gflops = gemm_gflop_count<float>(arg.M, arg.N, arg.K);
+        else if(arg.d_type == rocblas_datatype_f64_r)
+            overall_gflops = gemm_gflop_count<double>(arg.M, arg.N, arg.K);
+        else
+        {
+            rocblas_cout << "Precision not implemented, exiting";
+            return rocblas_status_not_implemented;
+        }
+        overall_gflops /= overall_time / 1e6 / multi_device; 
+
+        rocblas_cout<<"Overall performance using host timing"<<std::endl
+        << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us)"<< std::endl
+        << arg.transA << "," << arg.transB << ","
+        << arg.M << "," << arg.N << "," << arg.K << "," << arg.alpha << "," << arg.lda << "," << arg.ldb
+        << "," << arg.beta << "," << arg.ldc  << "," << overall_gflops << ","
+        << overall_time  << std::endl;
+    }
+    else
+    {
+        return launch_bench(arg, std::move(promise[0]));
+    }
+
 
     return 0;
 }
