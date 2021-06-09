@@ -1,3 +1,24 @@
+/* ************************************************************************
+ * Copyright (c) <2021> Advanced Micro Devices, Inc.
+ *  
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *  
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *  
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ * ************************************************************************ */
 #ifndef _UTILITY_
 #define _UTILITY_
 
@@ -16,6 +37,9 @@
 #include <condition_variable>
 #include <future>
 #include <queue>
+#include <fcntl.h>
+#include <type_traits>
+#include <sys/stat.h>
 
 #include <boost/program_options.hpp>
 namespace po = boost::program_options;
@@ -130,10 +154,14 @@ constexpr const char* rocblas_gemm_flags_to_string(rocblas_gemm_flags)
     return "none";
 }
 
-#define rocblas_cout (rocblas_internal_ostream::cout())
-#define rocblas_cerr (rocblas_internal_ostream::cerr())
+#define rocblas_cout (internal_ostream::cout())
+#define rocblas_cerr (internal_ostream::cerr())
 
-class rocblas_internal_ostream
+/***************************************************************************
+ * The internal_ostream class performs atomic IO on log files, and provides *
+ * consistent formatting                                                   *
+ ***************************************************************************/
+class internal_ostream
 {
     /**************************************************************************
      * The worker class sets up a worker thread for writing to log files. Two *
@@ -148,11 +176,16 @@ class rocblas_internal_ostream
             std::promise<void> promise;
 
         public:
-            // The task takes ownership of the string payload and promise
+            // The task takes ownership of the string payload
             task_t(std::string&& str, std::promise<void>&& promise)
                 : str(std::move(str))
                 , promise(std::move(promise))
             {
+            }
+
+            auto get_future()
+            {
+                return promise.get_future();
             }
 
             // Notify the future to wake up
@@ -190,14 +223,101 @@ class rocblas_internal_ostream
         std::queue<task_t> queue;
 
         // Worker thread which waits for and handles tasks sequentially
-        void thread_function();
+        void thread_function()
+        {
+            // Clear any errors in the FILE
+            clearerr(file);
+
+            // Lock the mutex in preparation for cond.wait
+            std::unique_lock<std::mutex> lock(mutex);
+
+            while(true)
+            {
+                // Wait for any data, ignoring spurious wakeups
+                cond.wait(lock, [&] { return !queue.empty(); });
+
+                // With the mutex locked, get and pop data from the front of queue
+                task_t task = std::move(queue.front());
+                queue.pop();
+
+                // Temporarily unlock queue mutex, unblocking other threads
+                lock.unlock();
+
+                // An empty message indicates the closing of the stream
+                if(!task.size())
+                {
+                    // Tell future to wake up
+                    task.set_value();
+                    break;
+                }
+
+                // Write the data
+                fwrite(task.data(), 1, task.size(), file);
+
+                // Detect any error and flush the C FILE stream
+                if(ferror(file) || fflush(file))
+                {
+                    perror("Error writing log file");
+
+                    // Tell future to wake up
+                    task.set_value();
+                    break;
+                }
+
+                // Promise that the data has been written
+                task.set_value();
+
+                // Re-lock the mutex in preparation for cond.wait
+                lock.lock();
+            }
+        }
 
     public:
         // Worker constructor creates a worker thread for a raw filehandle
-        explicit worker(int fd);
+        explicit worker(int fd)
+        {
+            // The worker duplicates the file descriptor (RAII)
+            fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+
+            // If the dup fails or fdopen fails, print error and abort
+            if(fd == -1 || !(file = fdopen(fd, "a")))
+            {
+                perror("fdopen() error");
+                rocblas_abort();
+            }
+
+            // Create a worker thread, capturing *this
+            thread = std::thread([=] { thread_function(); });
+
+            // Detatch from the worker thread
+            thread.detach();
+        }
 
         // Send a string to be written
-        void send(std::string);
+        void send(std::string str)
+        {
+            // Create a promise to wait for the operation to complete
+            std::promise<void> promise;
+
+            // The future indicating when the operation has completed
+            auto future = promise.get_future();
+
+            // task_t consists of string and promise
+            // std::move transfers ownership of str and promise to task
+            task_t worker_task(std::move(str), std::move(promise));
+
+            // Submit the task to the worker assigned to this device/inode
+            // Hold mutex for as short as possible, to reduce contention
+            // TODO: Consider whether notification should be done with lock held or released
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                queue.push(std::move(worker_task));
+                cond.notify_one();
+            }
+
+            // Wait for the task to be completed, to ensure flushed IO
+            future.get();
+        }
 
         // Destroy a worker when all std::shared_ptr references to it are gone
         ~worker()
@@ -212,7 +332,7 @@ class rocblas_internal_ostream
     };
 
     // Two filehandles point to the same file if they share the same (std_dev, std_ino).
-
+    
     // Initial slice of struct stat which contains device ID and inode
     struct file_id_t
     {
@@ -245,6 +365,22 @@ class rocblas_internal_ostream
         return map_mutex;
     }
 
+    // Map from file_id to a worker shared_ptr
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static auto& worker_map()
+    {
+        static std::map<file_id_t, std::shared_ptr<worker>, file_id_less> file_id_to_worker_map;
+        return file_id_to_worker_map;
+    }
+
+    // Mutex for accessing the map
+    // Implemented as singleton to avoid the static initialization order fiasco
+    static auto& worker_map_mutex()
+    {
+        static std::recursive_mutex map_mutex;
+        return map_mutex;
+    }
+
     // Output buffer for formatted IO
     std::ostringstream os;
 
@@ -255,47 +391,109 @@ class rocblas_internal_ostream
     bool yaml = false;
 
     // Get worker for file descriptor
-    static std::shared_ptr<worker> get_worker(int fd);
+    static std::shared_ptr<worker> get_worker(int fd)
+    {
+        // For a file descriptor indicating an error, return a nullptr
+        if(fd == -1)
+            return nullptr;
+
+        // C++ allows type punning of common initial sequences
+        union
+        {
+            struct stat statbuf;
+            file_id_t   file_id;
+        };
+
+        // Verify common initial sequence
+        static_assert(std::is_standard_layout<file_id_t>{} && std::is_standard_layout<struct stat>{}
+                        && offsetof(file_id_t, st_dev) == 0 && offsetof(struct stat, st_dev) == 0
+                        && offsetof(file_id_t, st_ino) == offsetof(struct stat, st_ino)
+                        && std::is_same<decltype(file_id_t::st_dev), decltype(stat::st_dev)>{}
+                        && std::is_same<decltype(file_id_t::st_ino), decltype(stat::st_ino)>{},
+                    "struct stat and file_id_t are not layout-compatible");
+
+        // Get the device ID and inode, to detect common files
+        if(fstat(fd, &statbuf))
+        {
+            perror("Error executing fstat()");
+            return nullptr;
+        }
+
+        // Lock the map from file_id -> std::shared_ptr<internal_ostream::worker>
+        std::lock_guard<std::recursive_mutex> lock(map_mutex());
+
+        // Insert a nullptr map element if file_id doesn't exist in map already
+        // worker_ptr is a reference to the std::shared_ptr<internal_ostream::worker>
+        auto& worker_ptr = map().emplace(file_id, nullptr).first->second;
+
+        // If a new entry was inserted, or an old entry is empty, create new worker
+        if(!worker_ptr)
+            worker_ptr = std::make_shared<worker>(fd);
+
+        // Return the existing or new worker matching the file
+        return worker_ptr;
+    }
 
     // Private explicit copy constructor duplicates the worker and starts a new buffer
-    explicit rocblas_internal_ostream(const rocblas_internal_ostream& other)
+    explicit internal_ostream(const internal_ostream& other)
         : worker_ptr(other.worker_ptr)
     {
     }
 
 public:
     // Default constructor is a std::ostringstream with no worker
-    rocblas_internal_ostream() = default;
+    internal_ostream() = default;
 
     // Move constructor
-    rocblas_internal_ostream(rocblas_internal_ostream&&) = default;
+    internal_ostream(internal_ostream&&) = default;
 
     // Move assignment
-    rocblas_internal_ostream& operator=(rocblas_internal_ostream&&) & = default;
+    internal_ostream& operator=(internal_ostream&&) & = default;
 
     // Copy assignment is deleted
-    rocblas_internal_ostream& operator=(const rocblas_internal_ostream&) = delete;
+    internal_ostream& operator=(const internal_ostream&) = delete;
 
     // Construct from a file descriptor, which is duped
-    explicit rocblas_internal_ostream(int fd);
+    explicit internal_ostream(int fd)
+        : worker_ptr(get_worker(fd))
+    {
+        if(!worker_ptr)
+        {
+            dprintf(STDERR_FILENO, "Error: Bad file descriptor %d\n", fd);
+            rocblas_abort();
+        }
+    }
 
     // Construct from a C filename
-    explicit rocblas_internal_ostream(const char* filename);
+    explicit internal_ostream(const char* filename)
+    {
+        int fd     = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0644);
+        worker_ptr = get_worker(fd);
+        if(!worker_ptr)
+        {
+            dprintf(STDERR_FILENO, "Cannot open %s: %m\n", filename);
+            rocblas_abort();
+        }
+        close(fd);
+    }
 
     // Construct from a std::string filename
-    explicit rocblas_internal_ostream(const std::string& filename)
-        : rocblas_internal_ostream(filename.c_str())
+    explicit internal_ostream(const std::string& filename)
+        : internal_ostream(filename.c_str())
     {
     }
 
     // Create a duplicate of this
-    rocblas_internal_ostream dup() const
+    internal_ostream dup() const
     {
         if(!worker_ptr)
             throw std::runtime_error(
-                "Attempting to duplicate a rocblas_internal_ostream without an associated file");
-        return rocblas_internal_ostream(*this);
+                "Attempting to duplicate a internal_ostream without an associated file");
+        return internal_ostream(*this);
     }
+
+    // For testing to allow file closing and deletion
+    static void clear_workers();
 
     // Convert stream output to string
     std::string str() const
@@ -311,25 +509,40 @@ public:
     }
 
     // Flush the output
-    void flush();
+    void flush()
+    {
+        // Flush only if this stream contains a worker (i.e., is not a string)
+        if(worker_ptr)
+        {
+            // The contents of the string buffer
+            auto str = os.str();
 
-    // Destroy the rocblas_internal_ostream
-    virtual ~rocblas_internal_ostream()
+            // Empty string buffers kill the worker thread, so they are not flushed here
+            if(str.size())
+                worker_ptr->send(std::move(str));
+
+            // Clear the string buffer
+            clear();
+        }
+    }
+
+    // Destroy the internal_ostream
+    virtual ~internal_ostream()
     {
         flush(); // Flush any pending IO
     }
 
     // Implemented as singleton to avoid the static initialization order fiasco
-    static rocblas_internal_ostream& cout()
+    static internal_ostream& cout()
     {
-        thread_local rocblas_internal_ostream t_cout{STDOUT_FILENO};
+        thread_local internal_ostream t_cout{STDOUT_FILENO};
         return t_cout;
     }
 
     // Implemented as singleton to avoid the static initialization order fiasco
-    static rocblas_internal_ostream& cerr()
+    static internal_ostream& cerr()
     {
-        thread_local rocblas_internal_ostream t_cerr{STDERR_FILENO};
+        thread_local internal_ostream t_cerr{STDERR_FILENO};
         return t_cerr;
     }
 
@@ -342,7 +555,7 @@ public:
 
     // Default output for non-enumeration types
     template <typename T, std::enable_if_t<!std::is_enum<std::decay_t<T>>{}, int> = 0>
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, T&& x)
+    friend internal_ostream& operator<<(internal_ostream& os, T&& x)
     {
         os.os << std::forward<T>(x);
         return os;
@@ -350,7 +563,7 @@ public:
 
     // Default output for enumeration types
     template <typename T, std::enable_if_t<std::is_enum<std::decay_t<T>>{}, int> = 0>
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, T&& x)
+    friend internal_ostream& operator<<(internal_ostream& os, T&& x)
     {
         os.os << std::underlying_type_t<std::decay_t<T>>(x);
         return os;
@@ -358,7 +571,7 @@ public:
 
     // Pairs for YAML output
     template <typename T1, typename T2>
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, std::pair<T1, T2> p)
+    friend internal_ostream& operator<<(internal_ostream& os, std::pair<T1, T2> p)
     {
         os << p.first << ": ";
         os.yaml = true;
@@ -369,7 +582,8 @@ public:
 
     // Complex output
     template <typename T>
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, const rocblas_complex_num<T>& x)
+    friend internal_ostream& operator<<(internal_ostream&     os,
+                                                const rocblas_complex_num<T>& x)
     {
         if(os.yaml)
             os.os << "'(" << std::real(x) << "," << std::imag(x) << ")'";
@@ -379,126 +593,205 @@ public:
     }
 
     // Floating-point output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, double x);
+    friend internal_ostream& operator<<(internal_ostream& os, double x)
+    {
+        if(!os.yaml)
+            os.os << x;
+        else
+        {
+            // For YAML, we must output the floating-point value exactly
+            if(std::isnan(x))
+                os.os << ".nan";
+            else if(std::isinf(x))
+                os.os << (x < 0 ? "-.inf" : ".inf");
+            else
+            {
+                char s[32];
+                snprintf(s, sizeof(s) - 2, "%.17g", x);
 
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_half half)
+                // If no decimal point or exponent, append .0 to indicate floating point
+                for(char* end = s; *end != '.' && *end != 'e' && *end != 'E'; ++end)
+                {
+                    if(!*end)
+                    {
+                        end[0] = '.';
+                        end[1] = '0';
+                        end[2] = '\0';
+                        break;
+                    }
+                }
+                os.os << s;
+            }
+        }
+        return os;
+    }
+
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_half half)
     {
         return os << float(half);
     }
 
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_bfloat16 bf16)
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_bfloat16 bf16)
     {
         return os << float(bf16);
     }
 
     // Integer output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, int32_t x)
+    friend internal_ostream& operator<<(internal_ostream& os, int32_t x)
     {
         os.os << x;
         return os;
     }
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, uint32_t x)
+    friend internal_ostream& operator<<(internal_ostream& os, uint32_t x)
     {
         os.os << x;
         return os;
     }
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, int64_t x)
+    friend internal_ostream& operator<<(internal_ostream& os, int64_t x)
     {
         os.os << x;
         return os;
     }
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, uint64_t x)
+    friend internal_ostream& operator<<(internal_ostream& os, uint64_t x)
     {
         os.os << x;
         return os;
     }
 
     // bool output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, bool b);
+    friend internal_ostream& operator<<(internal_ostream& os, bool b)
+    {
+        if(os.yaml)
+            os.os << (b ? "true" : "false");
+        else
+            os.os << (b ? 1 : 0);
+        return os;
+    }
 
     // Character output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, char c);
+    friend internal_ostream& operator<<(internal_ostream& os, char c)
+    {
+        if(os.yaml)
+        {
+            char s[]{c, 0};
+            os.os << std::quoted(s, '\'');
+        }
+        else
+            os.os << c;
+        return os;
+    }
 
     // String output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, const char* s);
+    friend internal_ostream& operator<<(internal_ostream& os, const char* s)
+    {
+        if(os.yaml)
+            os.os << std::quoted(s);
+        else
+            os.os << s;
+        return os;
+    }
 
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, const std::string& s)
+    friend internal_ostream& operator<<(internal_ostream& os, const std::string& s)
     {
         return os << s.c_str();
     }
 
     // rocblas_datatype output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_datatype d)
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_datatype d)
     {
         os.os << rocblas_datatype_string(d);
         return os;
     }
 
     // rocblas_operation output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_operation trans)
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                rocblas_operation         trans)
 
     {
         return os << rocblas_transpose_letter(trans);
     }
 
     // rocblas_fill output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_fill fill)
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_fill fill)
 
     {
         return os << rocblas_fill_letter(fill);
     }
 
     // rocblas_diagonal output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_diagonal diag)
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_diagonal diag)
 
     {
         return os << rocblas_diag_letter(diag);
     }
 
     // rocblas_side output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_side side)
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_side side)
 
     {
         return os << rocblas_side_letter(side);
     }
 
     // rocblas_status output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_status status)
+    friend internal_ostream& operator<<(internal_ostream& os, rocblas_status status)
     {
         os.os << rocblas_status_to_string(status);
         return os;
     }
 
     // atomics mode output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_atomics_mode mode)
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                rocblas_atomics_mode      mode)
     {
         os.os << rocblas_atomics_mode_to_string(mode);
         return os;
     }
 
     // gemm flags output
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, rocblas_gemm_flags flags)
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                rocblas_gemm_flags        flags)
     {
         os.os << rocblas_gemm_flags_to_string(flags);
         return os;
     }
 
-    // Transfer rocblas_internal_ostream to std::ostream
-    friend std::ostream& operator<<(std::ostream& os, const rocblas_internal_ostream& str)
+    // Transfer internal_ostream to std::ostream
+    friend std::ostream& operator<<(std::ostream& os, const internal_ostream& str)
     {
         return os << str.str();
     }
 
-    // Transfer rocblas_internal_ostream to rocblas_internal_ostream
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, const rocblas_internal_ostream& str)
+    // Transfer internal_ostream to internal_ostream
+    friend internal_ostream& operator<<(internal_ostream&       os,
+                                                const internal_ostream& str)
     {
         return os << str.str();
     }
-
-    friend std::ostream& operator<<(std::ostream& os, const rocblas_internal_ostream& str);
 
     // IO Manipulators
-    friend rocblas_internal_ostream& operator<<(rocblas_internal_ostream& os, std::ostream& (*pf)(std::ostream&));
+
+    friend internal_ostream& operator<<(internal_ostream& os,
+                                                std::ostream& (*pf)(std::ostream&))
+    {
+        // Turn YAML formatting on or off
+        if(pf == internal_ostream::yaml_on)
+            os.yaml = true;
+        else if(pf == internal_ostream::yaml_off)
+            os.yaml = false;
+        else
+        {
+            // Output the manipulator to the buffer
+            os.os << pf;
+
+            // If the manipulator is std::endl or std::flush, flush the output
+            if(pf == static_cast<std::ostream& (*)(std::ostream&)>(std::endl)
+               || pf == static_cast<std::ostream& (*)(std::ostream&)>(std::flush))
+            {
+                os.flush();
+            }
+        }
+        return os;
+    }
 
     // YAML Manipulators (only used for their addresses now)
     static std::ostream& yaml_on(std::ostream& os);
@@ -2093,6 +2386,7 @@ rocblas_int storeOutputData;
 rocblas_int device_id;
 rocblas_int multi_device;
 Barrier barrier;
+Barrier hBarrier;
 
 void readArgs(int argc, char* argv[], Arguments& arg)
 {
@@ -2408,7 +2702,10 @@ void readArgs(int argc, char* argv[], Arguments& arg)
         throw std::invalid_argument("Cannot combine multi_device and time_each_iter");
 
     if(multi_device > 1)
+    {
         barrier.init(multi_device);
+        hBarrier.init(multi_device-1);
+    }
     else
         set_device(device_id);
 }
