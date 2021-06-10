@@ -1,5 +1,5 @@
 # GemmDriver
-Internal tool for GEMM power-perf studies
+Tool to measure GEMM performance, using rocBLAS library.
 
 Getting Started
 ---------------
