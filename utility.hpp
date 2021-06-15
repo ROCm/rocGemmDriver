@@ -2385,8 +2385,9 @@ rocblas_int storeInitData;
 rocblas_int storeOutputData;
 rocblas_int device_id;
 rocblas_int multi_device;
-Barrier barrier;
-Barrier hBarrier;
+Barrier perfBarrier;
+Barrier memBarrier;
+Barrier memBarrier2;
 
 void readArgs(int argc, char* argv[], Arguments& arg)
 {
@@ -2703,8 +2704,9 @@ void readArgs(int argc, char* argv[], Arguments& arg)
 
     if(multi_device > 1)
     {
-        barrier.init(multi_device);
-        hBarrier.init(multi_device-1);
+        perfBarrier.init(multi_device);
+        memBarrier.init(multi_device-1);
+        memBarrier2.init(multi_device-1);
     }
     else
         set_device(device_id);

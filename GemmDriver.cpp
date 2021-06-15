@@ -73,8 +73,9 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
 
     rocblas_int reinit_c = arg.reinit_c && h_beta != 0;
     rocblas_int time_each_iter = arg.time_each_iter || reinit_c;
-    double      host_time, cpu_time_used;
-    double      rocblas_gflops, cblas_gflops;
+    double      host_time;
+    double      rocblas_gflops;
+    static double cpu_time_used, cblas_gflops;
     int         deviceId;
     if(multi_device>1)
         hipGetDevice(&deviceId);
@@ -111,9 +112,9 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
     static host_vector<T> hB(size_B);
     static host_vector<T> hC(size_C);
     host_vector<T> hC_1(transferOutput ? size_C : 0);
-    host_vector<T> hC_2(vChecks ? size_C : 0);
-    host_vector<T> hC_gold(vChecks ? size_C : 0);
-    host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
+    // host_vector<T> hC_2(vChecks ? size_C : 0);
+    static host_vector<T> hC_gold(vChecks ? size_C : 0);
+    static host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
 
     // Initial Data on CPU
     if((multi_device>1 && deviceId==0) || multi_device == 1)
@@ -239,20 +240,19 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
                         c_file,
                         batch_count);
         }
-        hBarrier.wait();
+        if(vChecks)
+            hC_gold = hC;
+        if(reinit_c)
+            hC_orig = hC;
+        memBarrier.wait();
     }
     else
-        hBarrier.wait();
+        memBarrier.wait();
 
     if(storeInitData)
     {
         storeInitToBin<T,T>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, batch_count);
     }
-
-    if(vChecks)
-        hC_gold = hC;
-    if(reinit_c)
-        hC_orig = hC;
 
     // copy data from CPU to device
     CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(T) * size_A, hipMemcpyHostToDevice));
@@ -283,8 +283,7 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
                                                             ldc,
                                                             stride_c,
                                                             batch_count));
-        if(transferOutput)
-            CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+        CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
         // ROCBLAS rocblas_pointer_mode_device
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
@@ -311,10 +310,14 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
                                                             ldc,
                                                             stride_c,
                                                             batch_count));
-        if(vChecks)
-        {
-            CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
+        if(multi_device > 1 && deviceId!=0)
+        {
+            memBarrier2.wait(deviceId);
+        }
+
+        if(vChecks && (multi_device==1 || (multi_device > 1 && deviceId==0)))
+        {
             // CPU BLAS
             cpu_time_used = get_time_us();
             for(rocblas_int i = 0; i < batch_count; i++)
@@ -335,32 +338,45 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
             }
             cpu_time_used = get_time_us() - cpu_time_used;
             cblas_gflops  = gemm_gflop_count<T>(M, N, K) * batch_count / cpu_time_used * 1e6;
-        }
 
-        if(arg.unit_check)
-        {
-            if(std::is_same<T, rocblas_half> {} && K > 10000)
+            if(multi_device > 1)
             {
-                // For large K, rocblas_half tends to diverge proportional to K
-                // Tolerance is slightly greater than 1 / 1024.0
-                const double tol = K * sum_error_tolerance<T>;
-                near_check_general<T>(M, N, batch_count, ldc, stride_c, hC_gold, hC_1, tol);
-                near_check_general<T>(M, N, batch_count, ldc, stride_c, hC_gold, hC_2, tol);
-            }
-            else
-            {
-                unit_check_general<T>(M, N, batch_count, ldc, stride_c, hC_gold, hC_1);
-                unit_check_general<T>(M, N, batch_count, ldc, stride_c, hC_gold, hC_2);
+                memBarrier2.wait(deviceId);
             }
         }
 
-        if(arg.norm_check)
+        hA=host_vector<T>();
+        hB=host_vector<T>();
+        hC=host_vector<T>();
+
+        for(int i=0; i<2; i++)
         {
-            double error_hst_ptr
-                = fabs(norm_check_general<T>('F', M, N, ldc, stride_c, batch_count, hC_gold, hC_1));
-            double error_dev_ptr
-                = fabs(norm_check_general<T>('F', M, N, ldc, stride_c, batch_count, hC_gold, hC_2));
-            rocblas_error = error_hst_ptr > error_dev_ptr ? error_hst_ptr : error_dev_ptr;
+            if(arg.unit_check)
+            {
+                if(std::is_same<T, rocblas_half> {} && K > 10000)
+                {
+                    // For large K, rocblas_half tends to diverge proportional to K
+                    // Tolerance is slightly greater than 1 / 1024.0
+                    const double tol = K * sum_error_tolerance<T>;
+                    near_check_general<T>(M, N, batch_count, ldc, stride_c, hC_gold, hC_1, tol);
+                }
+                else
+                {
+                    unit_check_general<T>(M, N, batch_count, ldc, stride_c, hC_gold, hC_1);
+                }
+            }
+
+            if(arg.norm_check)
+            {
+                double error
+                    = fabs(norm_check_general<T>('F', M, N, ldc, stride_c, batch_count, hC_gold, hC_1));
+
+                rocblas_error = error > rocblas_error ? error : rocblas_error;
+            }
+            if(i==0)
+            {
+                CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+            }
         }
     }
 #endif
@@ -444,7 +460,7 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
         if(multi_device>1)
         {
             usleep(0.5 * 1000000);
-            barrier.wait(deviceId);
+            perfBarrier.wait(deviceId);
         }
         times.first = get_time_us(); // in microseconds
         hipEventRecord(start, NULL);
@@ -487,10 +503,10 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
 
     rocblas_gflops = gemm_gflop_count<T>(M, N, K) * batch_count * number_hot_calls  / kernel_time * 1e3;
 
+    std::stringstream msg;
     if(multi_device>1)
     {
         double host_gflops = gemm_gflop_count<T>(M, N, K) * number_hot_calls / (host_time) * 1e6;
-        std::stringstream msg;
         msg << "Device " << deviceId << std::endl
         << "transA,transB,M,N,K,alpha,lda,stride_a,ldb,stride_b,beta,ldc,stride_c,Batch_"
             "Count,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)" << std::endl
@@ -498,10 +514,9 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
         << "," << lda << "," << stride_a << "," << ldb << "," << stride_b << "," << arg.get_beta<T>() 
         << "," << ldc << "," << stride_c << "," << batch_count << "," << rocblas_gflops << "," << host_gflops << "," 
         << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
-        rocblas_cout << msg.str();
     }
     else
-        rocblas_cout << "transA,transB,M,N,K,alpha,lda,stride_a,ldb,stride_b,beta,ldc,stride_c,Batch_"
+        msg << "transA,transB,M,N,K,alpha,lda,stride_a,ldb,stride_b,beta,ldc,stride_c,Batch_"
             "Count,rocblas-Gflops,host_time(us),kernel_time(us)" << std::endl
         << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << "," << arg.get_alpha<T>() 
         << "," << lda << "," << stride_a << "," << ldb << "," << stride_b << "," << arg.get_beta<T>() 
@@ -510,17 +525,11 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
 
     if(arg.norm_check)
     {
-        if(multi_device>1)
-        {
-            std::stringstream msg;
-            msg << "Device " << deviceId << std::endl << "cblas-Gflops,us,rocblas-error" << std::endl
-            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
-            rocblas_cout << msg.str();
-        }
-        else
-            rocblas_cout << "cblas-Gflops,us,rocblas-error" << std::endl
-            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+        msg << "cblas-Gflops,us,rocblas-error" << std::endl
+        << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
+    
+    rocblas_cout << msg.str();
 }
 
 template <typename Ti, typename To, typename Tc>
@@ -543,10 +552,11 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     rocblas_int time_each_iter = arg.time_each_iter || reinit_c || arg.flush_gpu_cache;
     rocblas_int tensile_timing = arg.tensile_timing;
 
-    double      host_time, cpu_time_used;
-    double      rocblas_gflops, cblas_gflops;
-    double      rocblas_error = 0.0;
-    int         deviceId;
+    double        host_time;
+    double        rocblas_gflops;
+    static double cpu_time_used, cblas_gflops;
+    double        rocblas_error = 0.0;
+    int           deviceId;
 
     if(multi_device>1)
         hipGetDevice(&deviceId);
@@ -597,12 +607,10 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     static host_vector<Ti> hB(size_B);
     static host_vector<To> hC(size_C);
     host_vector<To> hC_1(transferOutput ? size_C : 0);
-    host_vector<To> hC_2(vChecks ? size_C : 0);
-    host_vector<To> hC_gold(vChecks ? size_C : 0);
+    static host_vector<To> hC_gold(vChecks && c_equals_d ? size_C : 0);
     host_vector<To> hD_1(size_D);
-    host_vector<To> hD_2(size_D);
-    host_vector<To> hD_gold(vChecks ? size_D : 0);
-    host_vector<To> hC_orig(arg.reinit_c ? size_C : 0);
+    static host_vector<To> hD_gold(vChecks ? size_D : 0);
+    static host_vector<To> hC_orig(arg.reinit_c ? size_C : 0);
 
     if((multi_device>1 && deviceId==0) || multi_device == 1)
     {
@@ -766,27 +774,29 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
                 hB[ldb + 1] = Ti(positive_two);
             }
         }
-        hBarrier.wait();
+
+        if(!c_equals_d)
+            rocblas_init<To>(hD_1, M, N, ldd);
+
+        if(vChecks)
+        {
+            if(!c_equals_d)
+                hD_gold = hD_1;
+            else
+                hC_gold = hC;
+        }
+        if(reinit_c)
+            hC_orig = hC;
+             
+        memBarrier.wait();
     }
     else
-        hBarrier.wait();
+        memBarrier.wait();
 
     if(storeInitData)
     {
         storeInitToBin<Ti,To>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
     }
-
-    if(!c_equals_d)
-        rocblas_init<To>(hD_1, M, N, ldd);
-    hD_2    = hD_1;
-
-    if(vChecks)
-    {
-        hD_gold = hD_1;
-        hC_gold = hC;
-    }
-    if(reinit_c)
-        hC_orig = hC;
 
     // copy data from CPU to device
     // if int8 and A not transposed and valid case, pack A
@@ -817,12 +827,13 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
 
     CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(To) * size_C, hipMemcpyHostToDevice));
 
+    CHECK_HIP_ERROR(hipMemcpy(dD, hD_1, sizeof(To) * size_D, hipMemcpyHostToDevice));
+
 #ifdef VALIDATE
     if(arg.norm_check)
     {
         // ROCBLAS rocblas_pointer_mode_host
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_host));
-        CHECK_HIP_ERROR(hipMemcpy(dD, hD_1, sizeof(To) * size_D, hipMemcpyHostToDevice));
 
         CHECK_ROCBLAS_ERROR(rocblas_gemm_ex(handle,
                                             transA,
@@ -849,13 +860,10 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
                                             solution_index,
                                             flags));                     
 
-        if(transferOutput)
-        {
-            if(c_equals_d)
-                CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
-            else
-                CHECK_HIP_ERROR(hipMemcpy(hD_1, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
-        }
+        if(c_equals_d)
+            CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
+        else
+            CHECK_HIP_ERROR(hipMemcpy(hD_1, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
 
         // ROCBLAS rocblas_pointer_mode_device
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
@@ -865,7 +873,7 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
         if(c_equals_d)
             CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(To) * size_C, hipMemcpyHostToDevice));
         else
-            CHECK_HIP_ERROR(hipMemcpy(dD, hD_2, sizeof(To) * size_D, hipMemcpyHostToDevice));
+            CHECK_HIP_ERROR(hipMemcpy(dD, hD_gold, sizeof(To) * size_D, hipMemcpyHostToDevice));
 
         CHECK_ROCBLAS_ERROR(rocblas_gemm_ex(handle,
                                             transA,
@@ -891,15 +899,13 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
                                             algo,
                                             solution_index,
                                             flags));
-        if(vChecks)
+
+        if(multi_device > 1 && deviceId!=0)
         {
-            if(c_equals_d)
-                CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
-            else
-                CHECK_HIP_ERROR(hipMemcpy(hD_2, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
+            memBarrier2.wait(deviceId);
         }
 
-        if(vChecks)
+        if(vChecks && (multi_device==1 || (multi_device > 1 && deviceId==0)))
         {
             // CPU BLAS
             // copy C matrix into D matrix
@@ -920,59 +926,70 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
 
             cpu_time_used = get_time_us() - cpu_time_used;
             cblas_gflops  = gemm_gflop_count<To>(M, N, K) / cpu_time_used * 1e6;
-        }
 
-        if(arg.unit_check)
-        {
-            if(std::is_same<Tc, rocblas_half> {} && K > 10000)
+            if(multi_device > 1)
             {
-                // For large K, rocblas_half tends to diverge proportional to K
-                // Tolerance is slightly greater than 1 / 1024.0
-                const double tol = K * sum_error_tolerance<Tc>;
-                if(!c_equals_d)
-                {
-                    near_check_general<To>(M, N, ldd, hD_gold, hD_1, tol);
-                    near_check_general<To>(M, N, ldd, hD_gold, hD_2, tol);
-                }
-                else
-                {
-                    unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
-                    unit_check_general<To>(M, N, ldc, hC_gold, hC_2);
-                }
-            }
-            else
-            {
-                if(!c_equals_d)
-                {
-                    unit_check_general<To>(M, N, ldd, hD_gold, hD_1);
-                    unit_check_general<To>(M, N, ldd, hD_gold, hD_2);
-                }
-                else
-                {
-                    unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
-                    unit_check_general<To>(M, N, ldc, hC_gold, hC_2);
-                }
+                memBarrier2.wait(deviceId);
             }
         }
 
-        if(arg.norm_check)
+        hA=host_vector<Ti>();
+        hB=host_vector<Ti>();
+        hC=host_vector<To>();
+
+        for(int i=0; i<2; i++)
         {
-            auto errD = 0.0;
-            auto errC = 0.0;
-            if(!c_equals_d)
+            if(arg.unit_check)
             {
-                auto err1 = fabs(norm_check_general<To>('F', M, N, ldd, hD_gold, hD_1));
-                auto err2 = fabs(norm_check_general<To>('F', M, N, ldd, hD_gold, hD_2));
-                auto errD = err1 > err2 ? err1 : err2;
-            }
-            else
-            {
-                auto err3 = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_1));
-                auto err4 = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_2));
-                errC = err3 > err4 ? err3 : err4;
+                if(std::is_same<Tc, rocblas_half> {} && K > 10000)
+                {
+                    // For large K, rocblas_half tends to diverge proportional to K
+                    // Tolerance is slightly greater than 1 / 1024.0
+                    const double tol = K * sum_error_tolerance<Tc>;
+                    if(!c_equals_d)
+                    {
+                        near_check_general<To>(M, N, ldd, hD_gold, hD_1, tol);
+                    }
+                    else
+                    {
+                        unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
+                    }
+                }
+                else
+                {
+                    if(!c_equals_d)
+                    {
+                        unit_check_general<To>(M, N, ldd, hD_gold, hD_1);
+                    }
+                    else
+                    {
+                        unit_check_general<To>(M, N, ldc, hC_gold, hC_1);
+                    }
+                }
             }
 
-            rocblas_error = errD > errC ? errD : errC;
+            if(arg.norm_check)
+            {
+                auto err = 0.0;
+                if(!c_equals_d)
+                {
+                    err = fabs(norm_check_general<To>('F', M, N, ldd, hD_gold, hD_1));
+                }
+                else
+                {
+                    err = fabs(norm_check_general<To>('F', M, N, ldc, hC_gold, hC_1));
+                }
+
+                rocblas_error = err > rocblas_error ? err : rocblas_error;
+            }
+
+            if(i==0)
+            {
+                if(c_equals_d)
+                    CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(To) * size_C, hipMemcpyDeviceToHost));
+                else
+                    CHECK_HIP_ERROR(hipMemcpy(hD_1, dD, sizeof(To) * size_D, hipMemcpyDeviceToHost));
+            }
         }
     }
 #endif
@@ -1079,7 +1096,7 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
         if(multi_device>1)
         {
             usleep(0.5 * 1000000);
-            barrier.wait(deviceId);
+            perfBarrier.wait(deviceId);
         }
         times.first = get_time_us(); // in microseconds
         hipEventRecord(start[numEvents-1], NULL);
@@ -1137,11 +1154,11 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     rocblas_gflops = gemm_gflop_count<Ti>(M, N, K) * number_hot_calls / (tensile_timing ? tensile_time : kernel_time) * 1e3;
     double host_gflops = gemm_gflop_count<Ti>(M, N, K) * number_hot_calls / (host_time) * 1e6;
 
+    std::stringstream msg;
     if(tensile_timing)
     {
         if(multi_device>1)
         {
-            std::stringstream msg;
             msg << "Device " << deviceId << std::endl
             << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)" 
             << ",tensile_time(us)" << std::endl << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
@@ -1149,10 +1166,9 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
             << "," << arg.beta << "," << ldc << "," << rocblas_gflops << "," << host_gflops << ","
             << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << ","
             << tensile_time/number_hot_calls*1000 << std::endl;
-            rocblas_cout << msg.str();
         }
         else
-            rocblas_cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" 
+            msg << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" 
             << ",tensile_time(us)" << std::endl << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
             << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
             << "," << arg.beta << "," << ldc << "," << rocblas_gflops << ","
@@ -1163,17 +1179,15 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     {
         if(multi_device>1)
         {
-            std::stringstream msg;
             msg << "Device " << deviceId << std::endl
             << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)"<< std::endl
             << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
             << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
             << "," << arg.beta << "," << ldc << "," << rocblas_gflops << "," << host_gflops << ","
             << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
-            rocblas_cout << msg.str();
         }
         else
-            rocblas_cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)"<< std::endl
+            msg << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)"<< std::endl
                 << rocblas2char_operation(transA) << "," << rocblas2char_operation(transB) << ","
             << M << "," << N << "," << K << "," << arg.alpha << "," << lda << "," << ldb
             << "," << arg.beta << "," << ldc << "," << rocblas_gflops  << ","
@@ -1182,17 +1196,11 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
 
     if(arg.norm_check)
     {
-        if(multi_device>1)
-        {
-            std::stringstream msg;
-            msg << "Device " << deviceId << std::endl << "cblas-Gflops,us,rocblas-error" << std::endl
-            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
-            rocblas_cout << msg.str();
-        }
-        else
-            rocblas_cout << "cblas-Gflops,us,rocblas-error" << std::endl
-            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+        msg << "cblas-Gflops,us,rocblas-error" << std::endl
+        << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
+
+    rocblas_cout << msg.str();
 }
 
 template <typename T>
@@ -1214,8 +1222,9 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
 
     rocblas_int          reinit_c = arg.reinit_c && h_beta != 0;
     rocblas_int          time_each_iter = arg.time_each_iter || reinit_c;
-    double               host_time, cpu_time_used;
-    double               rocblas_gflops, cblas_gflops;
+    double               host_time;
+    double               rocblas_gflops;
+    static double        cblas_gflops, cpu_time_used;
     double               rocblas_error = 0.0;
     rocblas_local_handle handle;
     int deviceId;
@@ -1258,9 +1267,8 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
     static host_vector<T> hB(size_B);
     static host_vector<T> hC(size_C);
     host_vector<T> hC_1(transferOutput ? size_C : 0);
-    host_vector<T> hC_2(vChecks ? size_C : 0);
-    host_vector<T> hC_gold(vChecks ? size_C : 0);
-    host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
+    static host_vector<T> hC_gold(vChecks ? size_C : 0);
+    static host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
     // Initial Data on CPU
     if((multi_device>1 && deviceId==0) || multi_device == 1)
     {
@@ -1332,20 +1340,23 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
             loadFromBin(
                 transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
         }
-        hBarrier.wait();
+
+        if(reinit_c)
+            hC_orig = hC;
+
+        if(vChecks)
+            hC_gold = hC;
+        memBarrier.wait();
     }
     else
-        hBarrier.wait();
+    {
+        memBarrier.wait();
+    }
 
     if(storeInitData)
     {
         storeInitToBin<T,T>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
     }
-
-    if(vChecks)
-        hC_gold = hC;
-    if(reinit_c)
-        hC_orig = hC;
 
     // copy data from CPU to device
     CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(T) * size_A, hipMemcpyHostToDevice));
@@ -1360,8 +1371,7 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
         CHECK_ROCBLAS_ERROR(rocblas_gemm<T>(
             handle, transA, transB, M, N, K, &h_alpha, dA, lda, dB, ldb, &h_beta, dC, ldc));
 
-        if(transferOutput)
-            CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+        CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
 
         // ROCBLAS rocblas_pointer_mode_device
         CHECK_ROCBLAS_ERROR(rocblas_set_pointer_mode(handle, rocblas_pointer_mode_device));
@@ -1371,10 +1381,13 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
         CHECK_ROCBLAS_ERROR(rocblas_gemm<T>(
             handle, transA, transB, M, N, K, d_alpha, dA, lda, dB, ldb, d_beta, dC, ldc));
 
-        if(vChecks)
+        if(multi_device > 1 && deviceId!=0)
         {
-            CHECK_HIP_ERROR(hipMemcpy(hC_2, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
+            memBarrier2.wait(deviceId);
+        }
 
+        if(vChecks && (multi_device==1 || (multi_device > 1 && deviceId==0)))
+        {
             cpu_time_used = get_time_us();
             
             blis_gemm<T>(transA,
@@ -1393,30 +1406,43 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
 
             cpu_time_used = get_time_us() - cpu_time_used;
             cblas_gflops  = gemm_gflop_count<T>(M, N, K) / cpu_time_used * 1e6;
-        }
 
-        if(arg.unit_check)
-        {
-            if(std::is_same<T, rocblas_half>{} && K > 10000)
+            if(multi_device > 1)
             {
-                // For large K, rocblas_half tends to diverge proportional to K
-                // Tolerance is slightly greater than 1 / 1024.0
-                const double tol = K * sum_error_tolerance<T>;
-                near_check_general<T>(M, N, ldc, hC_gold, hC_1, tol);
-                near_check_general<T>(M, N, ldc, hC_gold, hC_2, tol);
-            }
-            else
-            {
-                unit_check_general<T>(M, N, ldc, hC_gold, hC_1);
-                unit_check_general<T>(M, N, ldc, hC_gold, hC_2);
+                memBarrier2.wait(deviceId);
             }
         }
 
-        if(arg.norm_check)
+        //releasing already used host memory
+        hA = host_vector<T>();
+        hB = host_vector<T>();
+        hC = host_vector<T>();
+
+        for(int i = 0; i<2; i++)
         {
-            auto err1     = fabs(norm_check_general<T>('F', M, N, ldc, hC_gold, hC_1));
-            auto err2     = fabs(norm_check_general<T>('F', M, N, ldc, hC_gold, hC_2));
-            rocblas_error = err1 > err2 ? err1 : err2;
+            if(arg.unit_check)
+            {
+                if(std::is_same<T, rocblas_half>{} && K > 10000)
+                {
+                    // For large K, rocblas_half tends to diverge proportional to K
+                    // Tolerance is slightly greater than 1 / 1024.0
+                    const double tol = K * sum_error_tolerance<T>;
+                    near_check_general<T>(M, N, ldc, hC_gold, hC_1, tol);
+                }
+                else
+                {
+                    unit_check_general<T>(M, N, ldc, hC_gold, hC_1);
+                }
+            }
+
+            if(arg.norm_check)
+            {
+                auto err1     = fabs(norm_check_general<T>('F', M, N, ldc, hC_gold, hC_1));
+                rocblas_error = err1 > rocblas_error ? err1 : rocblas_error;
+            }
+
+            if(i==0)
+                CHECK_HIP_ERROR(hipMemcpy(hC_1, dC, sizeof(T) * size_C, hipMemcpyDeviceToHost));
         }
     }
 #endif
@@ -1469,7 +1495,7 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
         if(multi_device>1)
         {
             usleep(0.5 * 1000000);
-            barrier.wait(deviceId);
+            perfBarrier.wait(deviceId);
         }
         times.first = get_time_us(); // in microseconds
         hipEventRecord(start, NULL);
@@ -1496,36 +1522,30 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
 
     rocblas_gflops = gemm_gflop_count<T>(M, N, K) * number_hot_calls / kernel_time * 1e3;
 
+    std::stringstream msg;
+
     if(multi_device>1)
     {
         double host_gflops = gemm_gflop_count<T>(M, N, K) * number_hot_calls / (host_time) * 1e6;
-        std::stringstream msg;
         msg << "Device " << deviceId << std::endl
         << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,rocblas-Gflops(using host_time),host_time(us),kernel_time(us)" << std::endl
         << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << ","
         << arg.get_alpha<T>() << "," << lda << "," << ldb << "," << arg.get_beta<T>() << "," << ldc
         << "," << rocblas_gflops << "," << host_gflops << "," << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
-        rocblas_cout  << msg.str();
     }
     else
-        rocblas_cout << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" << std::endl
+        msg << "transA,transB,M,N,K,alpha,lda,ldb,beta,ldc,rocblas-Gflops,host_time(us),kernel_time(us)" << std::endl
         << arg.transA << "," << arg.transB << "," << M << "," << N << "," << K << ","
         << arg.get_alpha<T>() << "," << lda << "," << ldb << "," << arg.get_beta<T>() << "," << ldc
         << "," << rocblas_gflops << "," << host_time / number_hot_calls << "," << kernel_time/number_hot_calls*1000 << std::endl;
 
     if(arg.norm_check)
     {
-        if(multi_device>1)
-        {
-            std::stringstream msg;
-            msg << "Device " << deviceId << std::endl << "cblas-Gflops,us,rocblas-error" << std::endl
-            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
-            rocblas_cout << msg.str();
-        }
-        else
-            rocblas_cout << "cblas-Gflops,us,rocblas-error" << std::endl
-            << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
+        msg << "cblas-Gflops,us,rocblas-error" << std::endl
+        << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
+
+    rocblas_cout  << msg.str();
 }
 
 int launch_bench(Arguments& arg, std::promise<std::pair<double,double>> promise)
@@ -1646,7 +1666,7 @@ int main(int argc, char* argv[])
         for(int i = 0 ; i<multi_device; ++i)
             threads.push_back(std::thread([&, i] { set_device(i); launch_bench(arg, std::move(promise[i])); }));
 
-        barrier.wait_to_trigger();
+        perfBarrier.wait_to_trigger();
 
         std::vector<std::pair<double,double>> times(multi_device);
 
