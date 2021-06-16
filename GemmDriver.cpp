@@ -112,7 +112,6 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
     static host_vector<T> hB(size_B);
     static host_vector<T> hC(size_C);
     host_vector<T> hC_1(transferOutput ? size_C : 0);
-    // host_vector<T> hC_2(vChecks ? size_C : 0);
     static host_vector<T> hC_gold(vChecks ? size_C : 0);
     static host_vector<T> hC_orig(arg.reinit_c ? size_C : 0);
 
@@ -316,7 +315,7 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
             memBarrier2.wait(deviceId);
         }
 
-        if(vChecks && (multi_device==1 || (multi_device > 1 && deviceId==0)))
+        if(multi_device==1 || (multi_device > 1 && deviceId==0))
         {
             // CPU BLAS
             cpu_time_used = get_time_us();
@@ -345,6 +344,7 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
             }
         }
 
+        //releasing already used host memory
         hA=host_vector<T>();
         hB=host_vector<T>();
         hC=host_vector<T>();
@@ -528,7 +528,7 @@ void BenchGemmStridedBatched(const Arguments& arg, std::promise<std::pair<double
         msg << "cblas-Gflops,us,rocblas-error" << std::endl
         << cblas_gflops << "," << cpu_time_used << "," << rocblas_error << std::endl;
     }
-    
+
     rocblas_cout << msg.str();
 }
 
@@ -905,7 +905,7 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
             memBarrier2.wait(deviceId);
         }
 
-        if(vChecks && (multi_device==1 || (multi_device > 1 && deviceId==0)))
+        if(multi_device==1 || (multi_device > 1 && deviceId==0))
         {
             // CPU BLAS
             // copy C matrix into D matrix
@@ -933,6 +933,7 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
             }
         }
 
+        //releasing already used host memory
         hA=host_vector<Ti>();
         hB=host_vector<Ti>();
         hC=host_vector<To>();
@@ -1386,7 +1387,7 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
             memBarrier2.wait(deviceId);
         }
 
-        if(vChecks && (multi_device==1 || (multi_device > 1 && deviceId==0)))
+        if(multi_device==1 || (multi_device > 1 && deviceId==0))
         {
             cpu_time_used = get_time_us();
             
@@ -1414,9 +1415,9 @@ void BenchGemm(Arguments& arg, std::promise<std::pair<double,double>> promise)
         }
 
         //releasing already used host memory
-        hA = host_vector<T>();
-        hB = host_vector<T>();
-        hC = host_vector<T>();
+        hA=host_vector<T>();
+        hB=host_vector<T>();
+        hC=host_vector<T>();
 
         for(int i = 0; i<2; i++)
         {
