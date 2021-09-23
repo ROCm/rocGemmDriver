@@ -571,6 +571,12 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     auto                 B_row = transB == rocblas_operation_none ? K : N;
     auto                 B_col = transB == rocblas_operation_none ? N : K;
 
+    // size checking is only needed for int8x4
+    bool pack_to_int8x4 = arg.flags & rocblas_gemm_flags_pack_int8x4;
+    bool int8_invalid   = (pack_to_int8x4 && std::is_same<Ti, int8_t>{}
+                         && (K % 4 != 0 || (transA != rocblas_operation_none && lda % 4 != 0)
+                             || (transB == rocblas_operation_none && ldb % 4 != 0)));
+
     // check for invalid sizes
     if(M < 0 || N < 0 || K < 0 || lda < A_row || ldb < B_row || ldc < M || (ldd < M && !c_equals_d)
        || (std::is_same<Ti, int8_t> {}
@@ -578,6 +584,12 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
                || (transB == rocblas_operation_none && ldb % 4 != 0))))
     {
         rocblas_cout << "Invalid sizes...exiting" << std::endl;
+        exit(1);
+    }
+
+    if(int8_invalid)
+    {
+        rocblas_cout << "Invalid int8 sizes...exiting" << std::endl;
         exit(1);
     }
 
@@ -717,6 +729,11 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
         {
             loadFromBin<Ti,To>(transA, transB, M, N, K, hA, lda, a_file, hB, ldb, b_file, hC, ldc, c_file, 1);
         }
+        else
+        {
+            rocblas_cout << "Invalid init type for Input type...exiting" << std::endl;
+            exit(1);
+        }
 
         if(std::is_same<To, rocblas_half>{} && std::is_same<Tc, float>{})
         {
@@ -725,53 +742,39 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
             // the following will overflow to inf in half arithmetic,
             // but it will equal zero in float arithmetic   65504 * 2 - 65504 * 2
             //
-            // set matrix A and matrix B upper left block to values below to cause
-            // inf overflow with 16 bit arithmetic, but no overflow for 32 bit arithmetic
-            //
-            // 65500 65500             2   -2
-            // 65500 65500            -2    2
+            // set matrix A and matrix B so reduction sum has 65504 * 2 - 65504 * 2
             //
             const rocblas_half ieee_half_near_max(65504.0 - 4.0);
             const rocblas_half positive_two(2.0);
             const rocblas_half negative_two(-2.0);
             if(M >= 2 && N >= 2 && K >= 2)
             {
-                hA[0]       = Ti(ieee_half_near_max);
-                hA[1]       = Ti(ieee_half_near_max);
-                hA[lda]     = Ti(ieee_half_near_max);
-                hA[lda + 1] = Ti(ieee_half_near_max);
-                hB[0]       = Ti(positive_two);
-                hB[1]       = Ti(negative_two);
-                hB[ldb]     = Ti(negative_two);
-                hB[ldb + 1] = Ti(positive_two);
-            }
-        }
-        else if(std::is_same<Ti, rocblas_bfloat16>{} && std::is_same<Tc, float>{})
-        {
-            // half precision IEEE has max and lowest values 65504 and -65504,
-            // float precision IEEE has max and lowest values 3.403e+38 and -3.403e+38
-            // the following will overflow to inf in half arithmetic,
-            // but it will equal zero in float arithmetic   65504 * 2 - 65504 * 2
-            //
-            // set matrix A and matrix B upper left block to values below to cause
-            // inf overflow with 16 bit arithmetic, but no overflow for 32 bit arithmetic
-            //
-            // 65500 65500             2   -2
-            // 65500 65500            -2    2
-            //
-            const float ieee_half_near_max = 65504.0f - 4.0f;
-            const float positive_two       = 2.0f;
-            const float negative_two       = -2.0f;
-            if(M >= 2 && N >= 2 && K >= 2)
-            {
-                hA[0]       = Ti(ieee_half_near_max);
-                hA[1]       = Ti(ieee_half_near_max);
-                hA[lda]     = Ti(ieee_half_near_max);
-                hA[lda + 1] = Ti(ieee_half_near_max);
-                hB[0]       = Ti(positive_two);
-                hB[1]       = Ti(negative_two);
-                hB[ldb]     = Ti(negative_two);
-                hB[ldb + 1] = Ti(positive_two);
+                if(transA == rocblas_operation_none)
+                {
+                    hA[0]   = Ti(ieee_half_near_max);
+                    hA[lda] = Ti(ieee_half_near_max);
+                }
+                else
+                {
+                    hA[0] = Ti(ieee_half_near_max);
+                    hA[1] = Ti(ieee_half_near_max);
+                }
+                if(transB == rocblas_operation_none)
+                {
+                    for(int j = 0; j < N; j++)
+                    {
+                        hB[j * ldb]     = j % 2 == 0 ? Ti(positive_two) : Ti(negative_two);
+                        hB[1 + j * ldb] = j % 2 == 0 ? Ti(negative_two) : Ti(positive_two);
+                    }
+                }
+                else
+                {
+                    for(int j = 0; j < N; j++)
+                    {
+                        hB[j]       = j % 2 == 0 ? Ti(positive_two) : Ti(negative_two);
+                        hB[ldb + j] = j % 2 == 0 ? Ti(negative_two) : Ti(positive_two);
+                    }
+                }
             }
         }
 
@@ -799,8 +802,9 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     }
 
     // copy data from CPU to device
-    // if int8 and A not transposed and valid case, pack A
-    if(std::is_same<Ti, int8_t> {} && transA == rocblas_operation_none)
+    // do packing only when pack_to_int8x4=true (int8x4)
+    // if int8x4 and A not transposed and valid case, pack A
+    if(std::is_same<Ti, int8_t>{} && transA == rocblas_operation_none && pack_to_int8x4)
     {
         host_vector<Ti> hA_packed(hA);
 
@@ -812,8 +816,9 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
         CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(Ti) * size_A, hipMemcpyHostToDevice));
     }
 
-    // if int8 and B transposed and valid case, pack B
-    if(std::is_same<Ti, int8_t> {} && transB != rocblas_operation_none)
+    // do packing only when pack_to_int8x4=true (int8x4)
+    // if int8x4 and B transposed and valid case, pack B
+    if(std::is_same<Ti, int8_t>{} && transB != rocblas_operation_none && pack_to_int8x4)
     {
         host_vector<Ti> hB_packed(hB);
 
@@ -1622,6 +1627,12 @@ int launch_bench(Arguments& arg, std::promise<std::pair<double,double>> promise)
                 && (compute_type == "f32_r" || compute_type == "s"))
         {
             BenchGemmEx<rocblas_half, rocblas_half, float>(arg, std::move(promise));
+        }
+        else if(a_type == "i8_r"  && b_type == "i8_r"
+                && c_type == "i32_r" && d_type == "i32_r"
+                && compute_type == "i32_r")
+        {
+            BenchGemmEx<int8_t, int32_t, int32_t>(arg, std::move(promise));
         }
         else
         {

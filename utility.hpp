@@ -3112,7 +3112,7 @@ void normalizeInputs(rocblas_operation transa,
     }
 }
 
-template <typename T, typename U = T>
+template <typename T, typename U = T, std::enable_if_t<!std::is_same<T, int8_t>{},int> = 0>
 static void init_broad_range_random_gemm(rocblas_operation transa,
                                          rocblas_operation transb,
                                          size_t            m,
@@ -3137,7 +3137,28 @@ static void init_broad_range_random_gemm(rocblas_operation transa,
         transa, transb, m, n, k, a, lda, stride_a, b, ldb, stride_b, c, ldc, stride_c, batch);
 }
 
-template <typename T, typename U = T>
+template <typename T, typename U = T, std::enable_if_t<std::is_same<T, int8_t>{},int> = 0>
+static void init_broad_range_random_gemm(rocblas_operation transa,
+                                         rocblas_operation transb,
+                                         size_t            m,
+                                         size_t            n,
+                                         size_t            k,
+                                         std::vector<T>& a,
+                                         size_t lda,
+                                         rocblas_stride stride_a,
+                                         std::vector<T>& b,
+                                         size_t ldb,
+                                         rocblas_stride stride_b,
+                                         std::vector<U>& c,
+                                         size_t ldc,
+                                         rocblas_stride stride_c,
+                                         size_t batch = 1)
+{
+    rocblas_cout << "Invalid init type for int8_t...exiting" << std::endl;
+    exit(1);
+}
+
+template <typename T, typename U = T, std::enable_if_t<!std::is_same<T, int8_t>{},int> = 0>
 static void init_narrow_range_random_gemm(rocblas_operation transa,
                                           rocblas_operation transb,
                                           size_t            m,
@@ -3159,8 +3180,29 @@ static void init_narrow_range_random_gemm(rocblas_operation transa,
     init_matrix<rocm_random_narrow_range>(c, m, n, ldc, stride_c, batch);
 }
 
+template <typename T, typename U = T, std::enable_if_t<std::is_same<T, int8_t>{},int> = 0>
+static void init_narrow_range_random_gemm(rocblas_operation transa,
+                                          rocblas_operation transb,
+                                          size_t            m,
+                                          size_t            n,
+                                          size_t            k,
+                                          std::vector<T>& a,
+                                          size_t lda,
+                                          rocblas_stride stride_a,
+                                          std::vector<T>& b,
+                                          size_t ldb,
+                                          rocblas_stride stride_b,
+                                          std::vector<U>& c,
+                                          size_t ldc,
+                                          rocblas_stride stride_c,
+                                          size_t batch = 1)
+{
+    rocblas_cout << "Invalid init type for int8_t...exiting" << std::endl;
+    exit(1);
+}
+
 //can cause nans from overflow
-template <typename T, typename U = T>
+template <typename T, typename U = T, std::enable_if_t<!std::is_same<T, int8_t>{},int> = 0>
 static void init_full_range_random_gemm(rocblas_operation transa,
                                         rocblas_operation transb,
                                         size_t            m,
@@ -3180,6 +3222,28 @@ static void init_full_range_random_gemm(rocblas_operation transa,
     init_matrix<rocm_random_full_range>(a, transa == rocblas_operation_none ? m : k, transa == rocblas_operation_none ? k : m, lda, stride_a, batch);
     init_matrix<rocm_random_full_range>(b, transb == rocblas_operation_none ? k : n, transb == rocblas_operation_none ? n : k, ldb, stride_b, batch);
     init_matrix<rocm_random_full_range>(c, m, n, ldc, stride_c, batch);
+}
+
+//can cause nans from overflow
+template <typename T, typename U = T, std::enable_if_t<std::is_same<T, int8_t>{},int> = 0>
+static void init_full_range_random_gemm(rocblas_operation transa,
+                                        rocblas_operation transb,
+                                        size_t            m,
+                                        size_t            n,
+                                        size_t            k,
+                                        std::vector<T>& a,
+                                        size_t lda,
+                                        rocblas_stride stride_a,
+                                        std::vector<T>& b,
+                                        size_t ldb,
+                                        rocblas_stride stride_b,
+                                        std::vector<U>& c,
+                                        size_t ldc,
+                                        rocblas_stride stride_c,
+                                        size_t batch = 1)
+{
+    rocblas_cout << "Invalid init type for int8_t...exiting" << std::endl;
+    exit(1);
 }
 
 template <typename T, typename U = T>
