@@ -13,10 +13,17 @@ Note: A user may choose to point to a local copy of rocblas by using the -r (--r
 Usage 
 ---------------
 Gemm parameters are specified via command line arguments. Here is a brief overview of the required arguments and default values for different initialization types.
-Example
+
+Example 1:
 ```
 $ ./GemmDriver -f gemm -r s --transposeA N --transposeB N -m 128 -n 128 -k 128 --alpha 1 --lda 128 --ldb 128 --beta 0 --ldc 128 -v 1 --initialization rand_broad
 ```
+
+Example 2 for multi-precision:
+```
+./GemmDriver -f gemm_ex --transposeA N --transposeB T -m 4096 -n 4096 -k 1024 --alpha 1 --a_type f16_r --lda 90112 --b_type f16_r --ldb 90112 --beta 1 --c_type f32_r --ldc 90112 --d_type f32_r --ldd 90112 --compute_type f32_r -i 1
+```
+
 The following arguments are the basic parameters for all GEMM launches:
 ```
 -f [ --function ] arg (=gemm)      GEMM function to test. (gemm,

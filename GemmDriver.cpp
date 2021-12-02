@@ -1622,6 +1622,13 @@ int launch_bench(Arguments& arg, std::promise<std::pair<double,double>> promise)
         {
             BenchGemmEx<rocblas_half, rocblas_half, rocblas_half>(arg, std::move(promise));
         }
+        // gemm_ex: fp16->fp32
+        else if(a_type == "f16_r"  && b_type == "f16_r"
+                && c_type == "f32_r" && d_type == "f32_r"
+                && (compute_type == "f32_r" || compute_type == "s"))
+        {
+            BenchGemmEx<rocblas_half, float, float>(arg, std::move(promise));
+        }
         else if(a_type == "f16_r"  && b_type == "f16_r"
                 && c_type == "f16_r" && d_type == "f16_r"
                 && (compute_type == "f32_r" || compute_type == "s"))

@@ -3049,9 +3049,6 @@ void normalizeInputs(rocblas_operation transa,
                       std::vector<T>& b,
                      size_t ldb,
                      rocblas_stride stride_b,
-                      std::vector<T>& c,
-                     size_t ldc,
-                     rocblas_stride stride_c,
                      size_t batch)
 {
     // We divide each element of B by the maximum corresponding element of A such that elem(A * B) <
@@ -3133,8 +3130,7 @@ static void init_broad_range_random_gemm(rocblas_operation transa,
     init_matrix<rocm_random_addable>(b, transb == rocblas_operation_none ? k : n, transb == rocblas_operation_none ? n : k, ldb, stride_b, batch);
     init_matrix<rocm_random_addable>(c, m, n, ldc, stride_c, batch);
 
-    normalizeInputs<T>(
-        transa, transb, m, n, k, a, lda, stride_a, b, ldb, stride_b, c, ldc, stride_c, batch);
+    normalizeInputs<T>(transa, transb, m, n, k, a, lda, stride_a, b, ldb, stride_b, batch);
 }
 
 template <typename T, typename U = T, std::enable_if_t<std::is_same<T, int8_t>{},int> = 0>
