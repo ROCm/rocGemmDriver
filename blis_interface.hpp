@@ -52,6 +52,20 @@ void blis_sgemm(rocblas_operation transA,
                 float*            C,
                 rocblas_int       ldc);
 
+void blis_hgemm(rocblas_operation transA,
+                rocblas_operation transB,
+                rocblas_int       m,
+                rocblas_int       n,
+                rocblas_int       k,
+                float             alpha,
+                rocblas_half*            A,
+                rocblas_int       lda,
+                rocblas_half*            B,
+                rocblas_int       ldb,
+                float             beta,
+                rocblas_half*            C,
+                rocblas_int       ldc);
+
 void blis_bfgemm(rocblas_operation transA,
                 rocblas_operation transB,
                 rocblas_int       m,
@@ -104,3 +118,6 @@ static constexpr auto blis_gemm<double, double, double> = blis_dgemm;
 
 template <>
 static constexpr auto blis_gemm<rocblas_bfloat16,rocblas_bfloat16,float> = blis_bfgemm;
+
+template <>
+static constexpr auto blis_gemm<rocblas_half,rocblas_half,float> = blis_hgemm;

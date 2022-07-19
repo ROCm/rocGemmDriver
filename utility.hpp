@@ -1178,7 +1178,7 @@ inline rocblas_double_complex random_generator<rocblas_double_complex>()
 template <>
 inline rocblas_half random_generator<rocblas_half>()
 {
-    return float_to_bfloat16_truncate(std::uniform_int_distribution<int>(-2, 2)(rocblas_rng));
+    return rocblas_half(std::uniform_int_distribution<int>(-2, 2)(rocblas_rng));
 };
 
 // for rocblas_bfloat16, generate float, and convert to rocblas_bfloat16
