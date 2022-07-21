@@ -735,7 +735,7 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
             exit(1);
         }
 
-        if(std::is_same<To, rocblas_half>{} && std::is_same<Tc, float>{})
+        if(arg.initialization != rocblas_initialization_file && std::is_same<To, rocblas_half>{} && std::is_same<Tc, float>{})
         {
             // half precision IEEE has max and lowest values 65504 and -65504,
             // float precision IEEE has max and lowest values 3.403e+38 and -3.403e+38
