@@ -1096,13 +1096,13 @@ inline bool rocblas_isnan(T)
 }
 
 template <typename T,
-          typename std::enable_if<!std::is_integral<T>{} && !is_complex<T>, int>::type = 0>
+          typename std::enable_if<!std::is_integral<T>{} && !rocblas_is_complex<T>, int>::type = 0>
 inline bool rocblas_isnan(T arg)
 {
     return std::isnan(arg);
 }
 
-template <typename T, typename std::enable_if<is_complex<T>, int>::type = 0>
+template <typename T, typename std::enable_if<rocblas_is_complex<T>, int>::type = 0>
 inline bool rocblas_isnan(const T& arg)
 {
     return rocblas_isnan(std::real(arg)) || rocblas_isnan(std::imag(arg));
@@ -2236,13 +2236,13 @@ struct Arguments
     }
 
 private:
-    template <typename T, typename U, typename std::enable_if<!is_complex<T>, int>::type = 0>
+    template <typename T, typename U, typename std::enable_if<!rocblas_is_complex<T>, int>::type = 0>
     static T convert_alpha_beta(U r, U i)
     {
         return T(r);
     }
 
-    template <typename T, typename U, typename std::enable_if<+is_complex<T>, int>::type = 0>
+    template <typename T, typename U, typename std::enable_if<+rocblas_is_complex<T>, int>::type = 0>
     static T convert_alpha_beta(U r, U i)
     {
         return T(r, i);
@@ -2999,14 +2999,14 @@ static void
 }
 
 // Absolute value
-template <typename T, typename std::enable_if<!is_complex<T>, int>::type = 0>
+template <typename T, typename std::enable_if<!rocblas_is_complex<T>, int>::type = 0>
 __device__ __host__ inline T rocblas_abs(T x)
 {
     return x < 0 ? -x : x;
 }
 
 // For complex, we have defined a __device__ __host__ compatible std::abs
-template <typename T, typename std::enable_if<is_complex<T>, int>::type = 0>
+template <typename T, typename std::enable_if<rocblas_is_complex<T>, int>::type = 0>
 __device__ __host__ inline auto rocblas_abs(T x)
 {
     return std::abs(x);
