@@ -2609,6 +2609,9 @@ void readArgs(int argc, char* argv[], Arguments& arg)
         exit(1);
     }
 
+    if(vm["reinit_c"].defaulted() && storeOutputData)
+        arg.reinit_c = 1;
+
     std::transform(precision.begin(), precision.end(), precision.begin(), ::tolower);
     auto prec = string2rocblas_datatype(precision);
     if(prec == static_cast<rocblas_datatype>(-1))

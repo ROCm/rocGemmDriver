@@ -87,7 +87,7 @@ The following arguments are the basic parameters for all GEMM launches:
 -i [ --iters ] arg (=10)           Iterations to run inside timing loop
 --reinit_c arg (=0)                Reinitialize C between iterations? 0 = No, 1 = Yes (default: No) 
                                    Will introduce event timer overhead. Performance with this feature 
-                                   enabled is comparable to --time_each_iter==1. 
+                                   enabled is comparable to --time_each_iter==1. Defaults to 1 when storeOutputData is enabled
 --flush_gpu_cache arg (=0)         Flush GPU L2 cache between iterations? 0 = No, 1 = Yes (default: No)
                                    Will introduce event timer overhead. Performance with this feature 
                                    enabled is comparable to --time_each_iter==1
