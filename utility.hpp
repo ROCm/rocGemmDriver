@@ -22,8 +22,6 @@
 #ifndef _UTILITY_
 #define _UTILITY_
 
-#define ROCM_USE_FLOAT16
-
 #include "rocblas.h"
 #include <cmath>
 #include <fstream>
@@ -113,6 +111,7 @@ constexpr const char* rocblas_datatype_string(rocblas_datatype type)
     case rocblas_datatype_u32_c:  return "u32_c";
     case rocblas_datatype_bf16_r: return "bf16_r";
     case rocblas_datatype_bf16_c: return "bf16_c";
+    case rocblas_datatype_invalid: return "invalid";
     }
     return "invalid";
 }
