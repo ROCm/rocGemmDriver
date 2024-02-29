@@ -9,13 +9,16 @@ import com.amd.project.*
 import com.amd.docker.*
 import java.nio.file.Path
 
-
+def runCompileCommand(platform, project, jobName, boolean debug=false)
+{
+    project.paths.construct_build_prefix()
+}
 
 def runCI =
 {
     nodeDetails, jobName->
 
-    def prj  = new rocProject('rocBLAS', 'StaticAnalysis')
+    def prj  = new rocProject('rocGemmDriver', 'StaticAnalysis')
 
     // Define test architectures, optional rocm version argument is available
     def nodes = new dockerNodes(nodeDetails, jobName, prj)
@@ -23,14 +26,21 @@ def runCI =
     boolean formatCheck = false
     boolean staticAnalysis = true
 
-    buildProject(prj, formatCheck, nodes.dockerArray, null, null, null, staticAnalysis)
+    def compileCommand =
+    {
+        platform, project->
+
+        runCompileCommand(platform, project, jobName, false)
+    }
+    
+    buildProject(prj, formatCheck, nodes.dockerArray, compileCommand, null, null, staticAnalysis)
 }
 
 ci: {
     String urlJobName = auxiliary.getTopJobName(env.BUILD_URL)
 
-    properties(auxiliary.addCommonProperties([pipelineTriggers([cron('0 1 * * 6')])]))
+    properties(auxiliary.addCommonProperties([pipelineTriggers([cron('0 1 * * *')])]))
     stage(urlJobName) {
-        runCI([ubuntu18:['any']], urlJobName)
+        runCI([ubuntu22:['any']], urlJobName)
     }
 }

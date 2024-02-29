@@ -3,6 +3,8 @@
 
 def runCompileCommand(platform, project, jobName)
 {
+    project.paths.construct_build_prefix()
+
     def getDependenciesCommand = ""
     if (project.installLibraryDependenciesFromCI)
     {
@@ -11,8 +13,7 @@ def runCompileCommand(platform, project, jobName)
             getDependenciesCommand += auxiliary.getLibrary(libraryName, platform.jenkinsLabel)
         }
     }
-    def command = """
-                    #!/usr/bin/env bash
+    def command = """#!/usr/bin/env bash
                     set -x
                     ${getDependenciesCommand}
                     cd ${project.paths.project_build_prefix}
