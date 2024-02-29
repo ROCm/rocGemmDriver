@@ -39,17 +39,8 @@ def runCI =
 ci: {
     String urlJobName = auxiliary.getTopJobName(env.BUILD_URL)
 
-    def jobNameList = ["main":([ubuntu22:['any']])]
-    jobNameList = auxiliary.appendJobNameList(jobNameList)
-
-    def propertyList = ["main":[pipelineTriggers([cron('0 1 * * 0')])]]
-    propertyList = auxiliary.appendPropertyList(propertyList)
-
-    if(!jobNameList.keySet().contains(urlJobName))
-    {
-        properties(auxiliary.addCommonProperties([pipelineTriggers([cron('0 1 * * *')])]))
-        stage(urlJobName) {
-            runCI([ubuntu22:['any']], urlJobName)
-        }
+    properties(auxiliary.addCommonProperties([pipelineTriggers([cron('0 1 * * *')])]))
+    stage(urlJobName) {
+        runCI([ubuntu22:['any']], urlJobName)
     }
 }
