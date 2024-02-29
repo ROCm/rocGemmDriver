@@ -9,13 +9,16 @@ import com.amd.project.*
 import com.amd.docker.*
 import java.nio.file.Path
 
-
+def runCompileCommand(platform, project, jobName, boolean debug=false)
+{
+    project.paths.construct_build_prefix()
+}
 
 def runCI =
 {
     nodeDetails, jobName->
 
-    def prj  = new rocProject('rocBLAS', 'StaticAnalysis')
+    def prj  = new rocProject('rocGemmDriver', 'StaticAnalysis')
 
     // Define test architectures, optional rocm version argument is available
     def nodes = new dockerNodes(nodeDetails, jobName, prj)
