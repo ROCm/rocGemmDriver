@@ -571,12 +571,6 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     auto                 B_row = transB == rocblas_operation_none ? K : N;
     auto                 B_col = transB == rocblas_operation_none ? N : K;
 
-    // size checking is only needed for int8x4
-    bool pack_to_int8x4 = arg.flags & rocblas_gemm_flags_pack_int8x4;
-    bool int8_invalid   = (pack_to_int8x4 && std::is_same<Ti, int8_t>{}
-                         && (K % 4 != 0 || (transA != rocblas_operation_none && lda % 4 != 0)
-                             || (transB == rocblas_operation_none && ldb % 4 != 0)));
-
     // check for invalid sizes
     if(M < 0 || N < 0 || K < 0 || lda < A_row || ldb < B_row || ldc < M || (ldd < M && !c_equals_d)
        || (std::is_same<Ti, int8_t> {}
@@ -584,12 +578,6 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
                || (transB == rocblas_operation_none && ldb % 4 != 0))))
     {
         rocblas_cout << "Invalid sizes...exiting" << std::endl;
-        exit(1);
-    }
-
-    if(int8_invalid)
-    {
-        rocblas_cout << "Invalid int8 sizes...exiting" << std::endl;
         exit(1);
     }
 
@@ -759,36 +747,10 @@ void BenchGemmEx(Arguments& arg, std::promise<std::pair<double,double>> promise)
     }
 
     // copy data from CPU to device
-    // do packing only when pack_to_int8x4=true (int8x4)
-    // if int8x4 and A not transposed and valid case, pack A
-    if(std::is_same<Ti, int8_t>{} && transA == rocblas_operation_none && pack_to_int8x4)
-    {
-        host_vector<Ti> hA_packed(hA);
 
-        rocblas_packInt8(hA_packed, M, K, lda);
-        CHECK_HIP_ERROR(hipMemcpy(dA, hA_packed, sizeof(Ti) * size_A, hipMemcpyHostToDevice));
-    }
-    else
-    {
-        CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(Ti) * size_A, hipMemcpyHostToDevice));
-    }
-
-    // do packing only when pack_to_int8x4=true (int8x4)
-    // if int8x4 and B transposed and valid case, pack B
-    if(std::is_same<Ti, int8_t>{} && transB != rocblas_operation_none && pack_to_int8x4)
-    {
-        host_vector<Ti> hB_packed(hB);
-
-        rocblas_packInt8(hB_packed, N, K, ldb);
-        CHECK_HIP_ERROR(hipMemcpy(dB, hB_packed, sizeof(Ti) * size_B, hipMemcpyHostToDevice));
-    }
-    else
-    {
-        CHECK_HIP_ERROR(hipMemcpy(dB, hB, sizeof(Ti) * size_B, hipMemcpyHostToDevice));
-    }
-
+    CHECK_HIP_ERROR(hipMemcpy(dA, hA, sizeof(Ti) * size_A, hipMemcpyHostToDevice));
+    CHECK_HIP_ERROR(hipMemcpy(dB, hB, sizeof(Ti) * size_B, hipMemcpyHostToDevice));
     CHECK_HIP_ERROR(hipMemcpy(dC, hC, sizeof(To) * size_C, hipMemcpyHostToDevice));
-
     CHECK_HIP_ERROR(hipMemcpy(dD, hD_1, sizeof(To) * size_D, hipMemcpyHostToDevice));
 
 #ifdef VALIDATE
